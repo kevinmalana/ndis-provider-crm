@@ -152,25 +152,75 @@ describe("cmd_on_my_way / cmd_start_shift / cmd_end_shift", () => {
         order by created_at desc limit 1`,
     );
     expect((rows[0] as { state: string }).state).toBe("pending");
+  });
 
+  it("accept_exception applies only a legal, version-matched transition", async () => {
+    const startedV = await startShift();
+    ex.setUser(fx.workerBUid);
+    const res = await ex.callRpc("cmd_end_shift", {
+      command_id: "c-end-unassigned-resolve",
+      shift_id: fx.shiftId,
+      expected_version: startedV,
+      claimed_at: iso(TEST_TS.getTime()),
+      client_tz: "Australia/Sydney",
+      payload: { source: "mobile" },
+    });
+    expect(res).toMatchObject({ status: "conflict_preserved" });
+    const { rows } = await ex.execAsService(
+      `select id, receipt_id from public.evidence_review_queue
+        order by created_at desc limit 1`,
+    );
     ex.setUser(fx.schedulerUid);
-    const resolved = (await ex.callRpc("cmd_resolve_conflict", {
-      command_id: "c-resolve-stale-end",
+    const resolved = await ex.callRpc("cmd_resolve_conflict", {
+      command_id: "c-resolve-unassigned-end",
       review_id: (rows[0] as { id: string }).id,
       decision: "accept_exception",
-      reason: "Supervisor accepts the captured end evidence.",
-      payload: { source: "dashboard" },
-    })) as { status: string; authoritative_state: string; original_receipt_id: string };
+      reason: "Accept the captured end event.",
+      payload: {},
+    });
     expect(resolved).toMatchObject({
       status: "accepted",
       authoritative_state: "ended_summary_required",
-      original_receipt_id: (rows[0] as { receipt_id: string }).receipt_id,
+      authoritative_version: startedV + 1,
     });
+    const { rows: shiftRows } = await ex.execAsService(
+      `select state, version from public.shifts where id = '${fx.shiftId}'`,
+    );
+    expect(shiftRows[0]).toMatchObject({ state: "ended_summary_required", version: startedV + 1 });
+  });
 
-    const { rows: resolvedShift } = await ex.execAsService(
+  it("does not overwrite a newer cancelled-needs-review state", async () => {
+    const startedV = await startShift();
+    ex.setUser(fx.workerBUid);
+    await ex.callRpc("cmd_end_shift", {
+      command_id: "c-end-cancelled-guard",
+      shift_id: fx.shiftId,
+      expected_version: startedV,
+      claimed_at: iso(TEST_TS.getTime()),
+      client_tz: "Australia/Sydney",
+      payload: {},
+    });
+    const { rows } = await ex.execAsService(
+      `select id from public.evidence_review_queue order by created_at desc limit 1`,
+    );
+    await ex.execAsService(
+      `update public.shifts set state = 'cancelled_needs_review', version = version + 1
+        where id = '${fx.shiftId}'`,
+    );
+    ex.setUser(fx.schedulerUid);
+    await expect(
+      ex.callRpc("cmd_resolve_conflict", {
+        command_id: "c-resolve-cancelled-guard",
+        review_id: (rows[0] as { id: string }).id,
+        decision: "accept_exception",
+        reason: "Must not overwrite cancellation review.",
+        payload: {},
+      }),
+    ).rejects.toThrow("stale_exception_version");
+    const { rows: shiftRows } = await ex.execAsService(
       `select state from public.shifts where id = '${fx.shiftId}'`,
     );
-    expect((resolvedShift[0] as { state: string }).state).toBe("ended_summary_required");
+    expect((shiftRows[0] as { state: string }).state).toBe("cancelled_needs_review");
   });
 
   it("non-assigned worker preserves evidence", async () => {
@@ -352,6 +402,16 @@ describe("portal request identity and idempotency", () => {
 describe("evidence preservation after reassignment", () => {
   it("preserves a worker command after membership withdrawal", async () => {
     const startedV = await startShift();
+    ex.setUser(fx.workerAUid);
+    const first = (await ex.callRpc("cmd_end_shift", {
+      command_id: "c-end-withdrawn",
+      shift_id: fx.shiftId,
+      expected_version: startedV,
+      claimed_at: iso(TEST_TS.getTime()),
+      client_tz: "Australia/Sydney",
+      payload: { source: "offline" },
+    })) as { status: string; receipt_id: string; outcome?: Record<string, unknown> };
+    expect(first.status).toBe("accepted");
     await ex.execAsService(
       `update public.organisation_memberships
           set status = 'withdrawn', withdrawn_at = now()
@@ -366,8 +426,12 @@ describe("evidence preservation after reassignment", () => {
       claimed_at: iso(TEST_TS.getTime()),
       client_tz: "Australia/Sydney",
       payload: { source: "offline" },
-    })) as { status: string; receipt_id: string };
-    expect(result.status).toBe("conflict_preserved");
+    })) as { status: string; duplicate?: boolean; receipt_id: string; outcome?: Record<string, unknown> };
+    expect(result).toMatchObject({ status: "accepted", duplicate: true, receipt_id: first.receipt_id });
+    const { rows: originalReceipt } = await ex.execAsService(
+      `select outcome from public.command_receipts where id = '${first.receipt_id}'`,
+    );
+    expect(result.outcome).toEqual((originalReceipt[0] as { outcome: Record<string, unknown> }).outcome);
     expect(result.receipt_id).toBeTruthy();
     const { rows } = await ex.execAsService(
       `select count(*)::int as c from public.command_receipts

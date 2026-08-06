@@ -576,6 +576,39 @@ create table if not exists public.command_receipts (
   unique (organisation_id, actor_membership_id, command_type, command_id)
 );
 
+-- Upgrade path for installations that already created command_receipts before
+-- actor_profile_id was introduced. CREATE TABLE IF NOT EXISTS does not alter
+-- an existing table, so keep the forward DDL explicit and rerunnable.
+alter table public.command_receipts
+  alter column actor_membership_id drop not null;
+alter table public.command_receipts
+  add column if not exists actor_profile_id uuid;
+
+update public.command_receipts r
+set actor_profile_id = m.profile_id
+from public.organisation_memberships m
+where r.actor_membership_id = m.id
+  and r.actor_profile_id is null;
+
+alter table public.command_receipts
+  alter column actor_profile_id set not null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'command_receipts_actor_profile_id_fkey'
+      and conrelid = 'public.command_receipts'::regclass
+  ) then
+    alter table public.command_receipts
+      add constraint command_receipts_actor_profile_id_fkey
+      foreign key (actor_profile_id)
+      references public.global_profiles (id)
+      on delete restrict;
+  end if;
+end;
+$$;
+
 create index if not exists command_receipts_org_idx
   on public.command_receipts (organisation_id, server_received_at desc);
 
@@ -590,6 +623,33 @@ create index if not exists command_receipts_receipt_lookup_idx
 
 create unique index if not exists command_receipts_profile_lookup_unique
   on public.command_receipts (organisation_id, actor_profile_id, command_type, command_id);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'representative_authorities_identity_tenant'
+      and conrelid = 'public.representative_authorities'::regclass
+  ) then
+    alter table public.representative_authorities
+      add constraint representative_authorities_identity_tenant
+      foreign key (organisation_id, representative_profile_id)
+      references public.organisation_memberships (organisation_id, profile_id)
+      on delete restrict;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'external_grants_identity_tenant'
+      and conrelid = 'public.external_disclosure_grants'::regclass
+  ) then
+    alter table public.external_disclosure_grants
+      add constraint external_grants_identity_tenant
+      foreign key (organisation_id, recipient_profile_id)
+      references public.organisation_memberships (organisation_id, profile_id)
+      on delete restrict;
+  end if;
+end;
+$$;
 
 ------------------------------------------------------------------------
 -- 11. evidence_review_queue (preserves rejected/conflicting evidence)

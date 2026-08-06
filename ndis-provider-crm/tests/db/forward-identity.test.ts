@@ -185,6 +185,40 @@ describe("forward identity migration", () => {
     expect((rows[0] as { c: number }).c).toBe(2);
   });
 
+  it("accepts an invitation only through the exact token-bound RPC", async () => {
+    const userId = "55555555-5555-4555-8555-555555555556";
+    const orgId = "66666666-6666-4666-8666-666666666667";
+    await ex.execAsService(
+      `insert into auth.users (id, email) values ('${userId}','invitee@test.example')`,
+    );
+    await ex.execAsService(
+      `insert into public.organisations (id, name, slug) values ('${orgId}','Invite Org','invite-org')`,
+    );
+    await ex.execAsService(
+      `insert into public.invitations
+        (organisation_id, email, role, token, expires_at)
+       values ('${orgId}','invitee@test.example','worker','exact-token',now() + interval '1 day')`,
+    );
+
+    ex.setUser(userId);
+    const accepted = await ex.callRpc("cmd_accept_invitation", {
+      token: "exact-token",
+    });
+    expect(accepted).toMatchObject({ status: "accepted", organisation_id: orgId, role: "worker" });
+    const { rows: memberships } = await ex.execAsService(
+      `select count(*)::int as c from public.organisation_memberships
+        where organisation_id = '${orgId}' and profile_id = '${userId}'`,
+    );
+    expect((memberships[0] as { c: number }).c).toBe(1);
+
+    await expect(
+      ex.callRpc("cmd_accept_invitation", { token: "exact-token" }),
+    ).rejects.toThrow("invitation_already_accepted");
+    await expect(
+      ex.callRpc("cmd_accept_invitation", { token: "not-the-token" }),
+    ).rejects.toThrow("invitation_not_found");
+  });
+
   it("set_active_organisation refuses when caller is not a member", async () => {
     const userId = "66666666-6666-4666-8666-666666666666";
     const orgA = "77777777-7777-4777-8777-777777777777";

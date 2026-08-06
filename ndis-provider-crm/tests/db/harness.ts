@@ -181,6 +181,9 @@ const Param = { name: "string", type: "string" };
 type ParamSpec = { name: string; type: string };
 
 const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
+  cmd_accept_invitation: {
+    params: [{ name: "token", type: "text" }],
+  },
   cmd_on_my_way: {
     params: [
       { name: "command_id", type: "text" },

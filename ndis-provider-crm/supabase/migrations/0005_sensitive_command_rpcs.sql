@@ -107,9 +107,6 @@ as $$
         where m.id = p_actor_membership
           and m.organisation_id = p_organisation_id
           and m.profile_id = auth.uid()
-          and m.status = 'active'
-          and m.effective_from <= now()
-          and (m.effective_until is null or m.effective_until > now())
           and o.deleted_at is null
       )
     )
@@ -332,6 +329,21 @@ begin
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
+  -- Check idempotency before live assignment validation so a historical
+  -- retry can return its original accepted receipt after withdrawal.
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'on_my_way', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
   -- Authorisation: must be the currently assigned worker (role check
   -- + effective windows inside assert_worker_assignment).
   begin
@@ -359,18 +371,6 @@ begin
       'receipt_id', v_receipt_id
     );
   end;
-
-  select * into v_existing
-  from public.lookup_command_receipt(
-    v_shift.organisation_id, v_membership_id, 'on_my_way', p_command_id
-  );
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id
-    );
-  end if;
 
   v_state_ok := v_shift.state in ('scheduled','in_transit');
 
@@ -1469,6 +1469,7 @@ declare
   v_existing           record;
   v_receipt_status     text;
   v_authoritative_state text;
+  v_expected_version   bigint;
 begin
   if p_decision not in ('accept_exception','reject','needs_more_info') then
     raise exception 'invalid_decision' using errcode = '22P02';
@@ -1531,18 +1532,36 @@ begin
   -- The original receipt remains immutable; this decision receipt links
   -- back to it and records the resulting state/version.
   if p_decision = 'accept_exception' and v_shift.id is not null then
+    v_expected_version := v_original.expected_version;
     v_authoritative_state := case v_original.command_type
       when 'start_shift' then 'started'
       when 'end_shift' then 'ended_summary_required'
       when 'cancel_shift' then 'cancelled'
       else null
     end;
-    if v_authoritative_state is not null
-       and v_shift.state not in ('finalised','corrected','cancelled') then
-      update public.shifts
-        set state = v_authoritative_state,
-            version = version + 1
-        where id = v_shift.id;
+    if v_authoritative_state is null then
+      raise exception 'exception_transition_not_supported' using errcode = '42501';
+    end if;
+    if v_expected_version is not null and v_shift.version <> v_expected_version then
+      raise exception 'stale_exception_version' using errcode = '40001';
+    end if;
+    if (v_original.command_type = 'start_shift'
+          and v_shift.state not in ('scheduled','in_transit'))
+       or (v_original.command_type = 'end_shift'
+          and v_shift.state <> 'started')
+       or (v_original.command_type = 'cancel_shift'
+          and v_shift.state not in ('scheduled','in_transit','started')) then
+      raise exception 'illegal_exception_transition' using errcode = '42501';
+    end if;
+    update public.shifts
+      set state = v_authoritative_state,
+          version = version + 1
+      where id = v_shift.id
+        and (v_expected_version is null or version = v_expected_version);
+    if not found then
+      raise exception 'stale_exception_version' using errcode = '40001';
+    end if;
+    if v_authoritative_state is not null then
       v_shift.state := v_authoritative_state;
       v_shift.version := v_shift.version + 1;
     end if;
