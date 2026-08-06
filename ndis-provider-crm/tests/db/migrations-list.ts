@@ -17,6 +17,7 @@ const MIGRATION_NAMES = [
   "0004_v1_domain_tables.sql",
   "0005_sensitive_command_rpcs.sql",
   "0006_access_matrix_rls.sql",
+  "0007_synthetic_seed_rpc.sql",
 ];
 
 export default MIGRATION_NAMES.map((name) =>
