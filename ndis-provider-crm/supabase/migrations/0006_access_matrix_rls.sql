@@ -473,7 +473,7 @@ create policy service_summaries_select_participant_self
       select 1 from public.shifts s
       where s.id = public.service_summaries.shift_id
         and s.participant_id in (select public.current_user_self_links_participant_id())
-        and s.state in ('finalised','corrected')
+        and s.state in ('finalised','corrected','cancelled')
     )
   );
 
@@ -487,7 +487,7 @@ create policy service_summaries_select_representative
         and s.participant_id in (
           select public.current_user_represents_participant('service_summary')
         )
-        and s.state in ('finalised','corrected')
+        and s.state in ('finalised','corrected','cancelled')
     )
   );
 
@@ -501,7 +501,7 @@ create policy service_summaries_select_external
         and s.participant_id in (
           select public.current_user_external_grants_participant('service_summary')
         )
-        and s.state in ('finalised','corrected')
+        and s.state in ('finalised','corrected','cancelled')
     )
   );
 
