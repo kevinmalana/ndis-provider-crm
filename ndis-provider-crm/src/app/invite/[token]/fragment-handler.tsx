@@ -14,7 +14,7 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
  *
  * Renders nothing.
  */
-export function InviteFragmentHandler() {
+export function InviteFragmentHandler({ token }: { token: string }) {
   const router = useRouter();
   const handled = useRef(false);
 
@@ -27,9 +27,12 @@ export function InviteFragmentHandler() {
     const supabase = createSupabaseBrowserClient();
     supabase.auth
       .getSession()
-      .then(({ data }) => {
+      .then(async ({ data }) => {
         if (data.session) {
-          router.replace("/app");
+          const { error } = await supabase.rpc("cmd_accept_invitation", {
+            p_token: token,
+          });
+          router.replace(error ? `/invite/${encodeURIComponent(token)}/expired` : "/app");
         } else {
           router.replace("/sign-in?error=invalid");
         }
@@ -37,7 +40,7 @@ export function InviteFragmentHandler() {
       .catch(() => {
         router.replace("/sign-in?error=invalid");
       });
-  }, [router]);
+  }, [router, token]);
 
   return null;
 }

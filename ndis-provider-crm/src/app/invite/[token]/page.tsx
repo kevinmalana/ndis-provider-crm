@@ -160,7 +160,10 @@ export default async function InvitePage({
     const supabase = await createSupabaseServerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      redirect("/app");
+      const accepted = await supabase.rpc("cmd_accept_invitation", {
+        p_token: token,
+      });
+      redirect(accepted.error ? `/invite/${encodeURIComponent(token)}/expired` : "/app");
     }
   }
 
@@ -189,7 +192,7 @@ export default async function InvitePage({
   if (sent) {
     return (
       <>
-        <InviteFragmentHandler />
+        <InviteFragmentHandler token={token} />
         <SentView email={view.email} organisation={view.organisation_name} />
       </>
     );
@@ -197,7 +200,7 @@ export default async function InvitePage({
 
   return (
     <>
-      <InviteFragmentHandler />
+      <InviteFragmentHandler token={token} />
       <ValidView
         token={token}
         email={view.email}

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 
 import "./globals.css";
 import { Inter } from "next/font/google";
@@ -13,7 +14,7 @@ export const metadata: Metadata = {
     "Multi-tenant SaaS CRM for Australian NDIS providers — roster support workers, capture mobile service records, and share appropriate information with participants, nominees, and authorised external parties.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={cn("font-sans", inter.variable)}>
       <body>
