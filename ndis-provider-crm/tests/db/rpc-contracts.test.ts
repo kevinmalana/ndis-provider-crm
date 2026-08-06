@@ -132,19 +132,18 @@ describe("cmd_on_my_way / cmd_start_shift / cmd_end_shift", () => {
     expect((rows[0] as { state: string }).state).toBe("pending");
   });
 
-  it("non-assigned worker gets rejected", async () => {
+  it("non-assigned worker preserves evidence", async () => {
     ex.setUser(fx.workerBUid);
     // No row in shift_assignments for worker B.
-    await expect(
-      ex.callRpc("cmd_start_shift", {
+    const result = await ex.callRpc("cmd_start_shift", {
         command_id: "c-start-bad",
         shift_id: fx.shiftId,
         expected_version: 1,
         claimed_at: iso(TEST_TS.getTime()),
         client_tz: "Australia/Sydney",
         payload: { source: "mobile" },
-      }),
-    ).rejects.toThrow();
+      });
+    expect((result as { status: string }).status).toBe("conflict_preserved");
   });
 });
 
@@ -172,7 +171,7 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
     const { rows: shiftRows } = await ex.execAsService(
       `select state, version from public.shifts where id = '${fx.shiftId}'`,
     );
-    expect((shiftRows[0] as { state: string }).state).toBe("submitted_local");
+    expect((shiftRows[0] as { state: string }).state).toBe("finalised");
 
     ex.setUser(fx.schedulerUid);
     const finalise = await ex.callRpc("cmd_finalise_summary", {
@@ -180,7 +179,7 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
       shift_id: fx.shiftId,
       payload: { source: "dashboard" },
     });
-    expect(finalise).toMatchObject({ status: "accepted", new_state: "finalised" });
+    expect(finalise).toMatchObject({ status: "accepted", duplicate: true, state: "finalised" });
 
     const { rows: shiftRows2 } = await ex.execAsService(
       `select state, version from public.shifts where id = '${fx.shiftId}'`,
@@ -188,11 +187,22 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
     const newV = (shiftRows2[0] as { version: number }).version;
     expect(newV).toBeGreaterThan(0);
 
+    ex.setUser(fx.workerAUid);
+    const request = (await ex.callRpc("cmd_request_correction", {
+      command_id: "c-correction-request-1",
+      shift_id: fx.shiftId,
+      reason: "Forgot to record meal-prep support.",
+      requested_changes: "Add meal preparation activity.",
+      payload: { source: "mobile" },
+    })) as { request_id: string };
+
     ex.setUser(fx.adminUid);
     const correct = (await ex.callRpc("cmd_apply_correction", {
       command_id: "c-correction-1",
-      shift_id: fx.shiftId,
+      request_id: request.request_id,
       expected_version: newV,
+      claimed_at: iso(TEST_TS.getTime() + 95 * 60 * 1000),
+      client_tz: "Australia/Sydney",
       activities: ["personal_care", "community_access", "meal_prep"],
       summary_text:
         "Helped Maya with morning routine, meal prep, and a short community outing.",
@@ -244,12 +254,13 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
       payload: {},
     });
     expect(replay).toMatchObject({
-      status: "duplicate_returned",
-      reason: "already_finalised",
+      status: "accepted",
+      duplicate: true,
+      state: "finalised",
     });
   });
 
-  it("finalise refused unless caller is admin or scheduler", async () => {
+  it("finalise compatibility endpoint is safe for worker retries", async () => {
     const v = await driveToAwaitingSummary();
     ex.setUser(fx.workerAUid);
     await ex.callRpc("cmd_submit_summary", {
@@ -262,14 +273,12 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
       audience: ["participant"],
       payload: {},
     });
-    // The worker themselves try to finalise: rejected.
-    await expect(
-      ex.callRpc("cmd_finalise_summary", {
+    const result = await ex.callRpc("cmd_finalise_summary", {
         command_id: "c-f-bad",
         shift_id: fx.shiftId,
         payload: {},
-      }),
-    ).rejects.toThrow();
+      });
+    expect(result).toMatchObject({ status: "accepted", duplicate: true, state: "finalised" });
   });
 });
 

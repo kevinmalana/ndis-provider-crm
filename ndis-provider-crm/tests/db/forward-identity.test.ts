@@ -123,7 +123,7 @@ describe("forward identity migration", () => {
           insert into public.organisation_memberships
               (organisation_id, profile_id, role, status, effective_from)
           values (v_inv.organisation_id, '${userId}', v_inv.role, 'active', now())
-          on conflict (organisation_id, profile_id, role) do nothing;
+          on conflict (organisation_id, profile_id) do nothing;
 
           update public.invitations set accepted_at = now()
             where id = v_inv.id;
@@ -156,7 +156,8 @@ describe("forward identity migration", () => {
        ('${orgForeign}','Foreigner','foreigner')`,
     );
     await ex.execAsService(
-      `insert into public.global_profiles (id, email) values ('${userId}','u3@test.example')`,
+      `insert into public.global_profiles (id, email) values ('${userId}','u3@test.example')
+       on conflict (id) do update set email = excluded.email`,
     );
     await ex.execAsService(
       `insert into public.organisation_memberships

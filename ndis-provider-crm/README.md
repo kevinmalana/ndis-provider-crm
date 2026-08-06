@@ -177,7 +177,7 @@ and admin clients consume for fully typed queries.
 | `pnpm db:test` | Vitest suite against an isolated pglite database — exercises every RLS policy and transactional RPC contract |
 | `pnpm db:types` | Regenerate `src/lib/supabase/types.gen.ts` from the linked Supabase project |
 | `pnpm bootstrap` | One-shot: create founding tenant + first admin invitation (prints URL to stdout) |
-| `pnpm seed:synthetic` | Synthetic-only dev seed (no real participant data) for worker / admin demo flows |
+| `pnpm seed:synthetic` | Synthetic-only dev seed (no real participant data) for worker / admin demo flows. Requires `SUPABASE_SYNTHETIC_SEED=true`, `SUPABASE_PROJECT_ENV=development`, and a dedicated `.synthetic` worker identity. |
 
 ## Quality gates (must pass)
 

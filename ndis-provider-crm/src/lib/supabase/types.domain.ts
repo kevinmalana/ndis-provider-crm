@@ -46,10 +46,13 @@ export type CommandType =
   | "start_shift"
   | "end_shift"
   | "submit_summary"
-  | "finalise_summary"
+  | "cancel_shift"
+  | "reassign_shift"
   | "resolve_conflict"
   | "request_correction"
-  | "apply_correction";
+  | "apply_correction"
+  | "request_access"
+  | "accept_invitation";
 
 export type CommandStatus =
   | "accepted"
@@ -68,6 +71,11 @@ export type CorrectionRequestStatus =
   | "approved"
   | "rejected"
   | "withdrawn";
+
+export type CorrectionRequesterKind =
+  | "workforce"
+  | "participant_self"
+  | "representative";
 
 export type GrantConsentBasis =
   | "participant"
@@ -136,17 +144,6 @@ export interface Invitation {
   accepted_at: IsoTimestamp | null;
   revoked_at: IsoTimestamp | null;
   issued_by: UUID | null;
-  created_at: IsoTimestamp;
-}
-
-export interface AuditLog {
-  id: UUID;
-  organisation_id: UUID | null;
-  actor: UUID | null;
-  action: string;
-  subject_type: string | null;
-  subject_id: UUID | null;
-  metadata: Record<string, unknown> | null;
   created_at: IsoTimestamp;
 }
 
@@ -304,6 +301,12 @@ export interface ServiceSummaryVersion {
   created_at: IsoTimestamp;
 }
 
+/** Non-recursive current-version projection (used by participant / representative / external reads). */
+export interface ServiceSummaryCurrentVersion
+  extends Omit<ServiceSummaryVersion, "superseded_by"> {
+  superseded_by: null;
+}
+
 export interface CommandReceipt {
   id: UUID;
   command_id: string;
@@ -311,6 +314,9 @@ export interface CommandReceipt {
   organisation_id: UUID;
   actor_membership_id: UUID;
   subject_shift_id: UUID | null;
+  subject_review_id: UUID | null;
+  subject_request_id: UUID | null;
+  subject_invitation_id: UUID | null;
   expected_version: number | null;
   claimed_at: IsoTimestamp;
   client_tz: string | null;
@@ -340,7 +346,8 @@ export interface CorrectionRequest {
   organisation_id: UUID;
   summary_id: UUID | null;
   shift_id: UUID | null;
-  requested_by: UUID;
+  requester_kind: CorrectionRequesterKind;
+  requester_profile_id: UUID;
   reason: string;
   requested_changes: string | null;
   status: CorrectionRequestStatus;
@@ -354,7 +361,7 @@ export interface CorrectionRequest {
 export interface AccessRequest {
   id: UUID;
   organisation_id: UUID;
-  requester: UUID;
+  requester_profile_id: UUID;
   participant_id: UUID | null;
   scope_categories: string[];
   reason: string;
@@ -390,26 +397,31 @@ export interface ShiftEvent {
   created_at: IsoTimestamp;
 }
 
-/* ---------- RPC parameter + result signatures ---------- */
+/* ---------- RPC parameter + result signatures ---------- *
+ * Every SQL parameter uses a `p_` prefix; the application code sends
+ * the same prefixed keys. PostgREST matches named arguments exactly.
+ */
 
 export interface CommandRpcArgs {
-  command_id: string;
-  shift_id: UUID;
-  claimed_at: IsoTimestamp;
-  client_tz: string;
-  payload: Record<string, unknown>;
+  p_command_id: string;
+  p_shift_id: UUID;
+  p_claimed_at: IsoTimestamp;
+  p_client_tz: string;
+  p_payload: Record<string, unknown>;
 }
 
 export interface VersionedCommandRpcArgs extends CommandRpcArgs {
-  expected_version: number;
+  p_expected_version: number;
 }
 
 export interface CommandResult {
-  status: CommandStatus | "duplicate_returned";
+  status: CommandStatus;
   duplicate?: boolean;
   receipt_id?: UUID;
   server_received_at?: IsoTimestamp;
   reason?: string;
+  state?: ShiftState;
+  current_version?: number;
   new_state?: ShiftState;
   version?: number;
   summary_id?: UUID;
@@ -418,37 +430,61 @@ export interface CommandResult {
   new_version_id?: UUID;
   review_id?: UUID;
   decision?: string;
+  request_id?: UUID;
+  requester_kind?: CorrectionRequesterKind;
+  new_assignment_id?: UUID;
+  previous_assignment_id?: UUID;
+  outcome?: Record<string, unknown>;
 }
 
 export interface SubmitSummaryRpcArgs extends VersionedCommandRpcArgs {
-  activities: string[];
-  summary_text: string;
-  audience: string[];
+  p_activities: string[];
+  p_summary_text: string;
+  p_audience: string[];
 }
 
-export interface ApplyCorrectionRpcArgs {
-  command_id: string;
-  shift_id: UUID;
-  expected_version: number;
-  activities: string[];
-  summary_text: string;
-  audience: string[];
-  reason: string;
-  payload: Record<string, unknown>;
+export interface CancelShiftRpcArgs extends VersionedCommandRpcArgs {
+  p_reason: string;
 }
 
-export interface RequestCorrectionRpcArgs {
-  command_id: string;
-  shift_id: UUID;
-  reason: string;
-  requested_changes: string;
-  payload: Record<string, unknown>;
+export interface ReassignShiftRpcArgs extends VersionedCommandRpcArgs {
+  p_new_worker_membership: UUID;
+  p_reason: string;
 }
 
 export interface ResolveConflictRpcArgs {
-  command_id: string;
-  review_id: UUID;
-  decision: "accept_exception" | "reject" | "needs_more_info";
-  reason: string;
-  payload: Record<string, unknown>;
+  p_command_id: string;
+  p_review_id: UUID;
+  p_decision: "accept_exception" | "reject" | "needs_more_info";
+  p_reason: string;
+  p_payload: Record<string, unknown>;
+}
+
+export interface RequestCorrectionRpcArgs {
+  p_command_id: string;
+  p_shift_id: UUID;
+  p_reason: string;
+  p_requested_changes: string;
+  p_payload: Record<string, unknown>;
+}
+
+export interface RequestAccessRpcArgs {
+  p_command_id: string;
+  p_participant_id: UUID;
+  p_scope_categories: string[];
+  p_reason: string;
+  p_payload: Record<string, unknown>;
+}
+
+export interface ApplyCorrectionRpcArgs {
+  p_command_id: string;
+  p_request_id: UUID;
+  p_expected_version: number;
+  p_claimed_at: IsoTimestamp;
+  p_client_tz: string;
+  p_activities: string[];
+  p_summary_text: string;
+  p_audience: string[];
+  p_reason: string;
+  p_payload: Record<string, unknown>;
 }

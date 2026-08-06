@@ -250,8 +250,10 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
   cmd_apply_correction: {
     params: [
       { name: "command_id", type: "text" },
-      { name: "shift_id", type: "uuid" },
+      { name: "request_id", type: "uuid" },
       { name: "expected_version", type: "bigint" },
+      { name: "claimed_at", type: "timestamptz" },
+      { name: "client_tz", type: "text" },
       { name: "activities", type: "text[]" },
       { name: "summary_text", type: "text" },
       { name: "audience", type: "text[]" },

@@ -6,45 +6,39 @@
 -- transitions"), sensitive state transitions use narrow Postgres RPC
 -- functions called directly through Supabase. Each RPC:
 --
---   1. Verifies the caller is authenticated and holds an *active*
---      membership in the relevant organisation.
---   2. Verifies role-specific authority (worker, scheduler/admin,
---      participant self-link, representative authority, external grant).
---   3. Verifies expected_version on the subject row.
---   4. Deduplicates by command_id — a retry returns the original receipt.
+--   1. Verifies the caller is authenticated and holds an *active,
+--      currently effective* membership in the relevant organisation.
+--   2. Verifies role-specific authority (worker / scheduler-admin /
+--      participant self-link / representative authority / external grant).
+--   3. Verifies expected_version on the subject row (when applicable).
+--   4. Deduplicates by (organisation_id, actor_membership_id,
+--      command_type, command_id) — a retry returns the original receipt
+--      atomically and only if the SAME actor calls it. Cross-actor and
+--      cross-organisation collisions are not possible because the unique
+--      key is scoped.
 --   5. Records client-reported (claimed_at) AND server-receipt times.
 --   6. Applies ONE state transition.
---   7. Preserves conflicts on the evidence_review_queue (no silent drop).
---   8. Appends one audit_log row and one shift_events row in the same
---      transaction.
+--   7. Routes every post-capture failure (reassignment, cancellation,
+--      stale version, invalid state, wrong assignment, token
+--      validation) into an attributed receipt + audit + shift_event +
+--      evidence_review_queue row. Evidence is never silently dropped.
+--   8. Conflict review decisions are one-way (immutable once decided).
+--   9. Successful worker summary submission auto-finalises the
+--      participant-visible summary; no admin bottleneck.
 --
--- No raw multi-table write path is exposed for these commands.
+-- Parameter naming convention: every parameter is named with a `p_`
+-- prefix so PostgREST named-argument resolution matches the SQL
+-- function signature exactly. The TypeScript wrapper
+-- (src/lib/supabase/commands.ts) and the route handlers mirror this.
 --
--- Out of scope (later tickets):
---   * Mobile outbox flush layer
---   * Background scheduler / retry policy
---   * Dashboard UI
---
--- Test plan (local pglite):
---   * Happy path: on_my_way → start → end → submit → finalise.
---   * Idempotency: re-calling with the same command_id returns the
---     original receipt verbatim and does not write a second audit row.
---   * Wrong assignment: another worker's command is rejected with
---     conflict_preserved status.
---   * Stale version: replaying an old version returns conflict_preserved.
---   * Cancellation after Start: shift moves to cancelled_needs_review,
---     evidence remains.
+-- Out of scope: mobile outbox flush layer, background scheduler, retry
+-- policy, dashboard UI.
 
 set search_path = public;
 
 ------------------------------------------------------------------------
 -- Pre-flight helper: assert caller is currently authenticated.
 ------------------------------------------------------------------------
--- Triggered at the start of every RPC. Returns auth.uid() in a
--- SECURITY DEFINER context (function owner is postgres). The exception
--- carries SQLSTATE 42501 so callers get a uniform "not_authorized"
--- error if the JWT was somehow invalid (shouldn't happen — middleware
--- would have already redirected — but defence in depth).
 
 create or replace function public.require_authenticated()
 returns uuid
@@ -57,8 +51,7 @@ declare
   v_uid uuid := auth.uid();
 begin
   if v_uid is null then
-    raise exception 'not_authorized'
-      using errcode = '42501';
+    raise exception 'not_authorized' using errcode = '42501';
   end if;
   return v_uid;
 end;
@@ -68,44 +61,25 @@ revoke all on function public.require_authenticated() from public;
 grant execute on function public.require_authenticated() to authenticated;
 
 ------------------------------------------------------------------------
--- Helper: lookup the caller's active membership id for an organisation.
+-- Helper: scoped command-receipt lookup.
 ------------------------------------------------------------------------
--- Returns null when caller is not a current active member.
+-- Returns the receipt for the (org, actor, type, command_id) tuple,
+-- or NULL when no row exists. Cross-actor / cross-org / cross-type
+-- lookups return nothing.
 
-create or replace function public.current_active_membership_id(
-  p_organisation_id uuid
+create or replace function public.lookup_command_receipt(
+  p_organisation_id    uuid,
+  p_actor_membership   uuid,
+  p_command_type       text,
+  p_command_id         text
 )
-returns uuid
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select m.id
-  from public.organisation_memberships m
-  where m.profile_id = auth.uid()
-    and m.organisation_id = p_organisation_id
-    and m.status = 'active'
-  limit 1
-$$;
-
-revoke all on function public.current_active_membership_id(uuid) from public;
-grant execute on function public.current_active_membership_id(uuid) to authenticated;
-
-------------------------------------------------------------------------
--- Helper: get-or-noop for an existing command receipt.
-------------------------------------------------------------------------
--- Used at the top of each sensitive RPC. If a row exists for the command
--- id, returns it (status + outcome) and tells the caller to short-circuit.
--- Otherwise returns a sentinel so the caller can proceed.
-
-create or replace function public.lookup_command_receipt(p_command_id text)
 returns table (
   found              boolean,
   status             text,
   outcome            jsonb,
   receipt_id         uuid,
-  server_received_at timestamptz
+  server_received_at timestamptz,
+  subject_shift_id   uuid
 )
 language sql
 stable
@@ -117,22 +91,25 @@ as $$
     r.status,
     r.outcome,
     r.id,
-    r.server_received_at
+    r.server_received_at,
+    r.subject_shift_id
   from public.command_receipts r
-  where r.command_id = p_command_id
+  where r.organisation_id = p_organisation_id
+    and r.actor_membership_id = p_actor_membership
+    and r.command_type = p_command_type
+    and r.command_id = p_command_id
   limit 1
 $$;
 
-revoke all on function public.lookup_command_receipt(text) from public;
-grant execute on function public.lookup_command_receipt(text) to authenticated;
+revoke all on function public.lookup_command_receipt(uuid, uuid, text, text) from public;
+grant execute on function public.lookup_command_receipt(uuid, uuid, text, text) to authenticated;
 
 ------------------------------------------------------------------------
--- Internal helper: append audit + shift_event in the same transaction.
+-- Internal helper: append audit + shift_event in one transaction.
 ------------------------------------------------------------------------
--- Called by every RPC after a successful state transition. Centralised
--- so the audit/event shape stays consistent. The audit row stores
--- auth.uid() as actor (a profile id); the shift_event stores the
--- caller's membership id so the actor path is auditable.
+-- Records auth.uid() as the audit actor (profile id, satisfies the FK
+-- on audit_log.actor); shift_events.actor_membership_id stays as the
+-- caller's membership id.
 
 create or replace function public.record_shift_audit(
   p_organisation_id   uuid,
@@ -178,6 +155,113 @@ $$;
 revoke all on function public.record_shift_audit(uuid, uuid, uuid, text, text, jsonb) from public;
 
 ------------------------------------------------------------------------
+-- Generic "preserve evidence" helper used by every sensitive RPC.
+------------------------------------------------------------------------
+-- Atomically writes a command_receipt + (optional) evidence_review_queue
+-- row + (optional) audit + (optional) shift_event in one transaction.
+-- Used by both happy-path and conflict-path branches.
+
+create or replace function public.record_command_outcome(
+  p_command_id         text,
+  p_command_type       text,
+  p_organisation_id    uuid,
+  p_actor_membership   uuid,
+  p_subject_shift_id   uuid,
+  p_expected_version   bigint,
+  p_claimed_at         timestamptz,
+  p_client_tz          text,
+  p_payload            jsonb,
+  p_status             text,
+  p_outcome            jsonb,
+  p_open_review        boolean,
+  p_review_context     jsonb
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_receipt_id uuid;
+begin
+  insert into public.command_receipts (
+    command_id, command_type, organisation_id, actor_membership_id,
+    subject_shift_id, expected_version, claimed_at, client_tz,
+    server_received_at, completed_at, status, outcome, payload
+  )
+  values (
+    p_command_id, p_command_type, p_organisation_id, p_actor_membership,
+    p_subject_shift_id, p_expected_version, p_claimed_at, p_client_tz,
+    now(), now(), p_status, p_outcome, p_payload
+  )
+  on conflict (organisation_id, actor_membership_id, command_type, command_id)
+  do update set server_received_at = public.command_receipts.server_received_at
+  returning id into v_receipt_id;
+
+  if p_open_review then
+    insert into public.evidence_review_queue (
+      receipt_id, organisation_id, original_payload, conflicting_context
+    )
+    values (
+      v_receipt_id, p_organisation_id, p_payload,
+      coalesce(p_review_context, '{}'::jsonb)
+    )
+    on conflict (receipt_id) do nothing;
+  end if;
+
+  return v_receipt_id;
+end;
+$$;
+
+revoke all on function public.record_command_outcome(
+  text, text, uuid, uuid, uuid, bigint, timestamptz, text, jsonb, text, jsonb, boolean, jsonb
+) from public;
+
+------------------------------------------------------------------------
+-- Shared helper: validate caller is the worker's currently effective
+-- assignment for a shift in the named org.
+------------------------------------------------------------------------
+
+create or replace function public.assert_worker_assignment(
+  p_shift_id uuid,
+  p_organisation_id uuid
+)
+returns uuid
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_membership_id uuid;
+begin
+  select m.id
+    into v_membership_id
+  from public.organisation_memberships m
+  join public.shift_assignments sa on sa.membership_id = m.id
+  where sa.shift_id = p_shift_id
+    and sa.withdrawn_at is null
+    and sa.effective_from <= now()
+    and (sa.effective_until is null or sa.effective_until > now())
+    and m.profile_id = auth.uid()
+    and m.organisation_id = p_organisation_id
+    and m.status = 'active'
+    and m.effective_from <= now()
+    and (m.effective_until is null or m.effective_until > now())
+    and m.role = 'worker'
+  limit 1;
+
+  if v_membership_id is null then
+    raise exception 'not_assigned' using errcode = '42501';
+  end if;
+
+  return v_membership_id;
+end;
+$$;
+
+revoke all on function public.assert_worker_assignment(uuid, uuid) from public;
+
+------------------------------------------------------------------------
 -- on_my_way: optional, never gates Start
 ------------------------------------------------------------------------
 
@@ -194,78 +278,84 @@ security definer
 set search_path = public
 as $$
 declare
-  v_uid                  uuid := public.require_authenticated();
-  v_shift                public.shifts%rowtype;
-  v_membership_id        uuid;
-  v_assignment           public.shift_assignments%rowtype;
-  v_receipt_id           uuid;
-  v_server_received_at   timestamptz := now();
-  v_status               text;
-  v_outcome              jsonb;
-  v_existing             record;
+  v_uid                uuid := public.require_authenticated();
+  v_shift              public.shifts%rowtype;
+  v_membership_id      uuid;
+  v_existing           record;
+  v_receipt_id         uuid;
+  v_state_ok           boolean := false;
 begin
-  -- Idempotency: short-circuit on repeat.
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
-  end if;
-
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
-  -- Must currently be assigned to this shift.
-  select * into v_assignment
-  from public.shift_assignments sa
-  where sa.shift_id = p_shift_id
-    and sa.membership_id = v_membership_id
-    and sa.withdrawn_at is null
-  limit 1;
-
-  if v_assignment.id is null then
-    raise exception 'not_assigned' using errcode = '42501';
-  end if;
-
-  -- Allowed transitions: scheduled → in_transit (and back via resolved,
-  -- but in_transit → in_transit is a no-op idem-style call).
-  if v_shift.state not in ('scheduled','in_transit') then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, claimed_at, client_tz, status, outcome, payload,
-      server_received_at, completed_at
-    )
-    values (
+  -- Authorisation: must be the currently assigned worker (role check
+  -- + effective windows inside assert_worker_assignment).
+  begin
+    v_membership_id := public.assert_worker_assignment(p_shift_id, v_shift.organisation_id);
+  exception when sqlstate '42501' then
+    -- Evidence-preservation path: write a receipt + audit + event +
+    -- review row so the worker can later see "my on-my-way was
+    -- rejected because I was no longer assigned".
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'on_my_way', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_claimed_at, p_client_tz, 'conflict_preserved',
-      jsonb_build_object('reason','invalid_state','state',v_shift.state),
-      p_payload, v_server_received_at, v_server_received_at
-    )
-    returning id into v_receipt_id;
-
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
-      jsonb_build_object('reason','invalid_state','state',v_shift.state)
+      p_shift_id, null, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','not_assigned'),
+      true,
+      jsonb_build_object('reason','not_assigned')
     );
-
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.on_my_way.conflicted',
+      jsonb_build_object('command_id',p_command_id,'reason','not_assigned')
+    );
     return jsonb_build_object(
       'status','conflict_preserved',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at,
-      'reason','invalid_state'
+      'reason','not_assigned',
+      'receipt_id', v_receipt_id
+    );
+  end;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'on_my_way', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id
+    );
+  end if;
+
+  v_state_ok := v_shift.state in ('scheduled','in_transit');
+
+  if not v_state_ok then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'on_my_way', v_shift.organisation_id, v_membership_id,
+      p_shift_id, v_shift.version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','invalid_state','state',v_shift.state),
+      true,
+      jsonb_build_object('reason','invalid_state','state',v_shift.state)
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.on_my_way.conflicted',
+      jsonb_build_object('command_id',p_command_id,'state',v_shift.state)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','invalid_state',
+      'state', v_shift.state,
+      'receipt_id', v_receipt_id
     );
   end if;
 
@@ -289,26 +379,20 @@ begin
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, expected_version, claimed_at, client_tz,
-    server_received_at, completed_at, status, outcome, payload
-  )
-  values (
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'on_my_way', v_shift.organisation_id, v_membership_id,
-    p_shift_id, v_shift.version, p_claimed_at, p_client_tz,
-    v_server_received_at, v_server_received_at, 'accepted',
+    p_shift_id, v_shift.version, p_claimed_at, p_client_tz, p_payload,
+    'accepted',
     jsonb_build_object('new_state','in_transit','version',v_shift.version+1),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
+    'receipt_id', v_receipt_id,
     'new_state','in_transit',
-    'version',v_shift.version+1
+    'version', v_shift.version + 1
   );
 end;
 $$;
@@ -317,7 +401,7 @@ revoke all on function public.cmd_on_my_way(text, uuid, timestamptz, text, jsonb
 grant execute on function public.cmd_on_my_way(text, uuid, timestamptz, text, jsonb) to authenticated;
 
 ------------------------------------------------------------------------
--- start_shift: scheduled|in_transit → started
+-- start_shift: scheduled|in_transit → started (atomic, evidence-preserving)
 ------------------------------------------------------------------------
 
 create or replace function public.cmd_start_shift(
@@ -337,66 +421,70 @@ declare
   v_uid                uuid := public.require_authenticated();
   v_shift              public.shifts%rowtype;
   v_membership_id      uuid;
-  v_assignment         public.shift_assignments%rowtype;
-  v_receipt_id         uuid;
-  v_server_received_at timestamptz := now();
   v_existing           record;
+  v_receipt_id         uuid;
+  v_state_ok           boolean := false;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
-  end if;
-
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
-  select * into v_assignment
-  from public.shift_assignments sa
-  where sa.shift_id = p_shift_id
-    and sa.membership_id = v_membership_id
-    and sa.withdrawn_at is null
-  limit 1;
-  if v_assignment.id is null then
-    raise exception 'not_assigned' using errcode = '42501';
+  -- Scoped idempotency: lookup BEFORE assignment check so a worker
+  -- retrying their own command_id can get the original receipt even
+  -- if they were subsequently unassigned.
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'start_shift', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
   end if;
 
-  -- Stale version is the conflict path.
-  if v_shift.version <> p_expected_version then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, expected_version, claimed_at, client_tz,
-      server_received_at, status, outcome, payload
-    )
-    values (
+  begin
+    v_membership_id := public.assert_worker_assignment(p_shift_id, v_shift.organisation_id);
+  exception when sqlstate '42501' then
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'start_shift', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-      v_server_received_at, 'conflict_preserved',
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','not_assigned'),
+      true,
+      jsonb_build_object('reason','not_assigned')
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.start.conflicted',
+      jsonb_build_object('command_id',p_command_id,'reason','not_assigned')
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','not_assigned',
+      'receipt_id', v_receipt_id
+    );
+  end;
+
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'start_shift', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
       jsonb_build_object(
         'reason','stale_version',
         'current_version',v_shift.version,
         'claimed_version',p_expected_version
       ),
-      p_payload
-    )
-    returning id into v_receipt_id;
-
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
+      true,
       jsonb_build_object(
         'current_version',v_shift.version,
         'claimed_version',p_expected_version
@@ -414,48 +502,32 @@ begin
     return jsonb_build_object(
       'status','conflict_preserved',
       'reason','stale_version',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
     );
   end if;
 
-  if v_shift.state not in ('scheduled','in_transit') then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, expected_version, claimed_at, client_tz,
-      server_received_at, status, outcome, payload
-    )
-    values (
+  v_state_ok := v_shift.state in ('scheduled','in_transit');
+
+  if not v_state_ok then
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'start_shift', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-      v_server_received_at, 'conflict_preserved',
-      jsonb_build_object(
-        'reason','invalid_state',
-        'state',v_shift.state
-      ),
-      p_payload
-    )
-    returning id into v_receipt_id;
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','invalid_state','state',v_shift.state),
+      true,
       jsonb_build_object('reason','invalid_state','state',v_shift.state)
     );
     perform public.record_shift_audit(
       v_shift.organisation_id, p_shift_id, v_membership_id,
       'conflicted', 'shift.start.conflicted',
-      jsonb_build_object(
-        'command_id',p_command_id,
-        'state',v_shift.state
-      )
+      jsonb_build_object('command_id',p_command_id,'state',v_shift.state)
     );
     return jsonb_build_object(
       'status','conflict_preserved',
       'reason','invalid_state',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at
+      'state', v_shift.state,
+      'receipt_id', v_receipt_id
     );
   end if;
 
@@ -479,30 +551,24 @@ begin
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, expected_version, claimed_at, client_tz,
-    server_received_at, completed_at, status, outcome, payload
-  )
-  values (
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'start_shift', v_shift.organisation_id, v_membership_id,
-    p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-    v_server_received_at, v_server_received_at, 'accepted',
+    p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+    'accepted',
     jsonb_build_object(
       'new_state','started',
       'previous_version',p_expected_version,
       'new_version',p_expected_version+1
     ),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
+    'receipt_id', v_receipt_id,
     'new_state','started',
-    'version',p_expected_version+1
+    'version', p_expected_version + 1
   );
 end;
 $$;
@@ -511,7 +577,7 @@ revoke all on function public.cmd_start_shift(text, uuid, bigint, timestamptz, t
 grant execute on function public.cmd_start_shift(text, uuid, bigint, timestamptz, text, jsonb) to authenticated;
 
 ------------------------------------------------------------------------
--- end_shift: started → ended_summary_required
+-- end_shift: started → ended_summary_required (atomic, evidence-preserving)
 ------------------------------------------------------------------------
 
 create or replace function public.cmd_end_shift(
@@ -531,64 +597,67 @@ declare
   v_uid                uuid := public.require_authenticated();
   v_shift              public.shifts%rowtype;
   v_membership_id      uuid;
-  v_assignment         public.shift_assignments%rowtype;
-  v_receipt_id         uuid;
-  v_server_received_at timestamptz := now();
   v_existing           record;
+  v_receipt_id         uuid;
+  v_state_ok           boolean := false;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
-  end if;
-
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
-  select * into v_assignment
-  from public.shift_assignments sa
-  where sa.shift_id = p_shift_id
-    and sa.membership_id = v_membership_id
-    and sa.withdrawn_at is null
-  limit 1;
-  if v_assignment.id is null then
-    raise exception 'not_assigned' using errcode = '42501';
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'end_shift', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
   end if;
 
-  if v_shift.version <> p_expected_version then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, expected_version, claimed_at, client_tz,
-      server_received_at, status, outcome, payload
-    )
-    values (
+  begin
+    v_membership_id := public.assert_worker_assignment(p_shift_id, v_shift.organisation_id);
+  exception when sqlstate '42501' then
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'end_shift', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-      v_server_received_at, 'conflict_preserved',
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','not_assigned'),
+      true,
+      jsonb_build_object('reason','not_assigned')
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.end.conflicted',
+      jsonb_build_object('command_id',p_command_id,'reason','not_assigned')
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','not_assigned',
+      'receipt_id', v_receipt_id
+    );
+  end;
+
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'end_shift', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
       jsonb_build_object(
         'reason','stale_version',
         'current_version',v_shift.version,
         'claimed_version',p_expected_version
       ),
-      p_payload
-    )
-    returning id into v_receipt_id;
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
+      true,
       jsonb_build_object(
         'current_version',v_shift.version,
         'claimed_version',p_expected_version
@@ -606,30 +675,20 @@ begin
     return jsonb_build_object(
       'status','conflict_preserved',
       'reason','stale_version',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
     );
   end if;
 
-  if v_shift.state <> 'started' then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, expected_version, claimed_at, client_tz,
-      server_received_at, status, outcome, payload
-    )
-    values (
+  v_state_ok := v_shift.state = 'started';
+
+  if not v_state_ok then
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'end_shift', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-      v_server_received_at, 'conflict_preserved',
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
       jsonb_build_object('reason','invalid_state','state',v_shift.state),
-      p_payload
-    )
-    returning id into v_receipt_id;
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
+      true,
       jsonb_build_object('reason','invalid_state','state',v_shift.state)
     );
     perform public.record_shift_audit(
@@ -640,8 +699,8 @@ begin
     return jsonb_build_object(
       'status','conflict_preserved',
       'reason','invalid_state',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at
+      'state', v_shift.state,
+      'receipt_id', v_receipt_id
     );
   end if;
 
@@ -665,30 +724,24 @@ begin
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, expected_version, claimed_at, client_tz,
-    server_received_at, completed_at, status, outcome, payload
-  )
-  values (
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'end_shift', v_shift.organisation_id, v_membership_id,
-    p_shift_id, p_expected_version, p_claimed_at, p_client_tz,
-    v_server_received_at, v_server_received_at, 'accepted',
+    p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+    'accepted',
     jsonb_build_object(
       'new_state','ended_summary_required',
       'previous_version',p_expected_version,
       'new_version',p_expected_version+1
     ),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
+    'receipt_id', v_receipt_id,
     'new_state','ended_summary_required',
-    'version',p_expected_version+1
+    'version', p_expected_version + 1
   );
 end;
 $$;
@@ -697,9 +750,12 @@ revoke all on function public.cmd_end_shift(text, uuid, bigint, timestamptz, tex
 grant execute on function public.cmd_end_shift(text, uuid, bigint, timestamptz, text, jsonb) to authenticated;
 
 ------------------------------------------------------------------------
--- submit_summary: ended_summary_required → submitted_local
--- Records the FIRST version of the summary (not a correction).
+-- submit_summary: ended_summary_required → finalised (auto-finalise)
 ------------------------------------------------------------------------
+-- Per the revised flow: a successful worker submission finalises the
+-- participant-readable summary automatically. There is no mandatory
+-- admin step. External visibility remains grant-scoped.
+-- Idempotency: (org, actor, type, command_id).
 
 create or replace function public.cmd_submit_summary(
   p_command_id       text,
@@ -720,89 +776,119 @@ declare
   v_uid                uuid := public.require_authenticated();
   v_shift              public.shifts%rowtype;
   v_membership_id      uuid;
-  v_assignment         public.shift_assignments%rowtype;
-  v_receipt_id         uuid;
-  v_version_id         uuid;
-  v_summary_id         uuid;
-  v_server_received_at timestamptz := now();
   v_existing           record;
+  v_receipt_id         uuid;
+  v_summary_id         uuid;
+  v_version_id         uuid;
+  v_state_ok           boolean := false;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
-  end if;
-
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
-  select * into v_assignment
-  from public.shift_assignments sa
-  where sa.shift_id = p_shift_id
-    and sa.membership_id = v_membership_id
-    and sa.withdrawn_at is null
-  limit 1;
-  if v_assignment.id is null then
-    raise exception 'not_assigned' using errcode = '42501';
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'submit_summary', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
   end if;
 
-  -- A summary may only be submitted for a shift the worker ended (or is
-  -- assigned-and-ending in the same submit). For v1 we require
-  -- ended_summary_required as the precondition.
-  if v_shift.state <> 'ended_summary_required' then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, expected_version, claimed_at, status, outcome, payload,
-      server_received_at
-    )
-    values (
+  begin
+    v_membership_id := public.assert_worker_assignment(p_shift_id, v_shift.organisation_id);
+  exception when sqlstate '42501' then
+    v_receipt_id := public.record_command_outcome(
       p_command_id, 'submit_summary', v_shift.organisation_id, v_membership_id,
-      p_shift_id, p_expected_version, p_claimed_at, 'conflict_preserved',
+      p_shift_id, p_expected_version, p_claimed_at, null, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','not_assigned'),
+      true,
+      jsonb_build_object('reason','not_assigned')
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.submit_summary.conflicted',
+      jsonb_build_object('command_id',p_command_id,'reason','not_assigned')
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','not_assigned',
+      'receipt_id', v_receipt_id
+    );
+  end;
+
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'submit_summary', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, null, p_payload,
+      'conflict_preserved',
+      jsonb_build_object(
+        'reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version
+      ),
+      true,
+      jsonb_build_object(
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version
+      )
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.submit_summary.conflicted',
+      jsonb_build_object(
+        'command_id',p_command_id,
+        'claimed_version',p_expected_version,
+        'current_version',v_shift.version
+      )
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','stale_version',
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
+    );
+  end if;
+
+  v_state_ok := v_shift.state = 'ended_summary_required';
+
+  if not v_state_ok then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'submit_summary', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, null, p_payload,
+      'conflict_preserved',
       jsonb_build_object('reason','invalid_state','state',v_shift.state),
-      p_payload, v_server_received_at
-    )
-    returning id into v_receipt_id;
-    insert into public.evidence_review_queue (
-      receipt_id, organisation_id, original_payload, conflicting_context
-    )
-    values (
-      v_receipt_id, v_shift.organisation_id, p_payload,
+      true,
       jsonb_build_object('reason','invalid_state','state',v_shift.state)
+    );
+    perform public.record_shift_audit(
+      v_shift.organisation_id, p_shift_id, v_membership_id,
+      'conflicted', 'shift.submit_summary.conflicted',
+      jsonb_build_object('command_id',p_command_id,'state',v_shift.state)
     );
     return jsonb_build_object(
       'status','conflict_preserved',
       'reason','invalid_state',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at
+      'state', v_shift.state,
+      'receipt_id', v_receipt_id
     );
   end if;
 
-  -- Idempotency / uniqueness at shift level: there is exactly one
-  -- service_summaries row per shift. A retry of submit_summary (different
-  -- command_id) on the same shift would collide, and is therefore
-  -- rejected with conflict_preserved. The supervisor-led correction
-  -- flow uses apply_correction.
-
-  insert into public.service_summaries (shift_id)
-  values (p_shift_id)
+  insert into public.service_summaries (organisation_id, shift_id)
+  values (v_shift.organisation_id, p_shift_id)
   on conflict (shift_id) do update set updated_at = now()
   returning id into v_summary_id;
-
-  -- Replace any prior unsubmitted version with a new v=1. Corrections
-  -- create subsequent version rows; this RPC produces only v=1.
-  delete from public.service_summary_versions
-    where summary_id = v_summary_id and version_number = 1 and is_correction = false;
 
   insert into public.service_summary_versions (
     summary_id, version_number, activities, summary_text, audience_categories,
@@ -816,13 +902,13 @@ begin
 
   update public.service_summaries
     set current_version_id = v_version_id,
+        finalised_at = now(),
         has_correction = false,
-        finalised_at = null,
         updated_at = now()
     where id = v_summary_id;
 
   update public.shifts
-    set state = 'submitted_local',
+    set state = 'finalised',
         version = version + 1
     where id = p_shift_id
       and version = p_expected_version;
@@ -836,38 +922,45 @@ begin
     jsonb_build_object(
       'command_id',p_command_id,
       'claimed_at',p_claimed_at,
+      'summary_id',v_summary_id,
       'version_id',v_version_id
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, expected_version, claimed_at,
-    server_received_at, completed_at, status, outcome, payload
-  )
-  values (
+  perform public.record_shift_audit(
+    v_shift.organisation_id, p_shift_id, v_membership_id,
+    'summary_finalised', 'shift.summary_finalised',
+    jsonb_build_object(
+      'command_id',p_command_id,
+      'summary_id',v_summary_id,
+      'current_version_id',v_version_id,
+      'auto_finalise', true
+    )
+  );
+
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'submit_summary', v_shift.organisation_id, v_membership_id,
-    p_shift_id, p_expected_version, p_claimed_at,
-    v_server_received_at, v_server_received_at, 'accepted',
+    p_shift_id, p_expected_version, p_claimed_at, null, p_payload,
+    'accepted',
     jsonb_build_object(
       'summary_id',v_summary_id,
       'current_version_id',v_version_id,
-      'new_state','submitted_local',
+      'new_state','finalised',
       'previous_version',p_expected_version,
-      'new_version',p_expected_version+1
+      'new_version',p_expected_version+1,
+      'auto_finalise', true
     ),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
-    'summary_id',v_summary_id,
-    'current_version_id',v_version_id,
-    'new_state','submitted_local',
-    'version',p_expected_version+1
+    'receipt_id', v_receipt_id,
+    'summary_id', v_summary_id,
+    'current_version_id', v_version_id,
+    'new_state','finalised',
+    'version', p_expected_version + 1
   );
 end;
 $$;
@@ -875,14 +968,53 @@ $$;
 revoke all on function public.cmd_submit_summary(text, uuid, bigint, timestamptz, text[], text, text[], jsonb) from public;
 grant execute on function public.cmd_submit_summary(text, uuid, bigint, timestamptz, text[], text, text[], jsonb) to authenticated;
 
-------------------------------------------------------------------------
--- finalise_summary: submitted_local|syncing → finalised
--- Authorised actor: scheduler or admin in the active org.
-------------------------------------------------------------------------
-
+-- Compatibility endpoint for clients that still send the pre-auto-finalise
+-- command. Worker submission now finalises atomically; this endpoint is
+-- therefore idempotent for an already-finalised shift and never reopens or
+-- overwrites a summary.
 create or replace function public.cmd_finalise_summary(
+  p_command_id text,
+  p_shift_id uuid,
+  p_payload jsonb default '{}'::jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_shift public.shifts;
+begin
+  select * into v_shift from public.shifts where id = p_shift_id for update;
+  if v_shift.id is null then
+    raise exception 'shift_not_found' using errcode = 'P0002';
+  end if;
+  if v_shift.state not in ('finalised','corrected','cancelled') then
+    raise exception 'summary_not_ready' using errcode = 'P0001';
+  end if;
+  return jsonb_build_object('status','accepted','duplicate',true,
+                            'command_id',p_command_id,'shift_id',p_shift_id,
+                            'state',v_shift.state,'version',v_shift.version);
+end;
+$$;
+
+revoke all on function public.cmd_finalise_summary(text, uuid, jsonb) from public;
+grant execute on function public.cmd_finalise_summary(text, uuid, jsonb) to authenticated;
+
+------------------------------------------------------------------------
+-- cancel_shift: scheduled|in_transit|started → cancelled/cancelled_needs_review
+------------------------------------------------------------------------
+-- Authorised actor: admin/scheduler in the active org. Cancellation
+-- AFTER local evidence moves the shift to cancelled_needs_review; the
+-- evidence (audit + events + receipts) is preserved untouched.
+
+create or replace function public.cmd_cancel_shift(
   p_command_id       text,
   p_shift_id         uuid,
+  p_expected_version bigint,
+  p_claimed_at       timestamptz,
+  p_client_tz        text,
+  p_reason           text,
   p_payload          jsonb
 )
 returns jsonb
@@ -893,135 +1025,297 @@ as $$
 declare
   v_uid                uuid := public.require_authenticated();
   v_shift              public.shifts%rowtype;
-  v_summary            public.service_summaries%rowtype;
   v_membership_id      uuid;
-  v_membership_role    text;
-  v_receipt_id         uuid;
-  v_server_received_at timestamptz := now();
+  v_role               text;
   v_existing           record;
+  v_receipt_id         uuid;
+  v_new_state          text;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
-  end if;
-
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
 
-  select role into v_membership_role
-  from public.organisation_memberships
-  where id = v_membership_id;
-  if v_membership_role not in ('admin','scheduler') then
-    raise exception 'finalise_requires_admin_or_scheduler'
-      using errcode = '42501';
+  v_role := public.current_user_membership_role();
+  if v_role not in ('admin','scheduler') then
+    raise exception 'cancel_requires_admin_or_scheduler' using errcode = '42501';
   end if;
 
-  select * into v_summary
-  from public.service_summaries
-  where shift_id = p_shift_id;
-  if v_summary.id is null or v_summary.current_version_id is null then
-    raise exception 'no_summary_to_finalise' using errcode = 'P0001';
-  end if;
-
-  if v_shift.state not in ('submitted_local','syncing','finalised') then
-    raise exception 'invalid_state_for_finalise'
-      using errcode = '23514', detail = v_shift.state;
-  end if;
-
-  -- Finalise is idempotent on already-finalised.
-  if v_shift.state = 'finalised' then
-    insert into public.command_receipts (
-      command_id, command_type, organisation_id, actor_membership_id,
-      subject_shift_id, claimed_at, server_received_at, status, outcome, payload
-    )
-    values (
-      p_command_id, 'finalise_summary', v_shift.organisation_id, v_membership_id,
-      p_shift_id, now(), v_server_received_at, 'duplicate_returned',
-      jsonb_build_object('already_finalised',true),
-      p_payload
-    )
-    returning id into v_receipt_id;
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'cancel_shift', p_command_id
+  );
+  if v_existing.found then
     return jsonb_build_object(
-      'status','duplicate_returned',
-      'reason','already_finalised',
-      'receipt_id',v_receipt_id,
-      'server_received_at',v_server_received_at,
-      'new_state','finalised'
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
     );
   end if;
 
-  update public.shifts
-    set state = 'finalised',
-        version = version + 1
-    where id = p_shift_id;
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'cancel_shift', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version),
+      true,
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','stale_version',
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
+    );
+  end if;
 
-  update public.service_summaries
-    set finalised_at = now(),
-        updated_at = now()
-    where id = v_summary.id;
+  -- Decide new state based on whether any local evidence exists for
+  -- this shift. Evidence is preserved (audit + events + receipts are
+  -- append-only), so cancellation after evidence routes to
+  -- cancelled_needs_review rather than a silent cancelled.
+  if exists (
+    select 1 from public.shift_events
+    where shift_id = p_shift_id
+      and event_type in ('on_my_way','start','end','summary_submitted','summary_finalised')
+  ) then
+    v_new_state := 'cancelled_needs_review';
+  else
+    v_new_state := 'cancelled';
+  end if;
+
+  update public.shifts
+    set state = v_new_state,
+        version = version + 1,
+        cancellation_reason = p_reason,
+        cancelled_at = now(),
+        cancelled_by = auth.uid()
+    where id = p_shift_id
+      and version = p_expected_version;
+  if not found then
+    raise exception 'concurrent_update' using errcode = '40001';
+  end if;
 
   perform public.record_shift_audit(
     v_shift.organisation_id, p_shift_id, v_membership_id,
-    'summary_finalised', 'shift.summary_finalised',
+    'cancelled', 'shift.cancelled',
     jsonb_build_object(
       'command_id',p_command_id,
-      'summary_id',v_summary.id,
-      'current_version_id',v_summary.current_version_id
+      'reason',p_reason,
+      'new_state',v_new_state
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, claimed_at, server_received_at, completed_at,
-    status, outcome, payload
-  )
-  values (
-    p_command_id, 'finalise_summary', v_shift.organisation_id, v_membership_id,
-    p_shift_id, now(), v_server_received_at, v_server_received_at,
+  v_receipt_id := public.record_command_outcome(
+    p_command_id, 'cancel_shift', v_shift.organisation_id, v_membership_id,
+    p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
     'accepted',
-    jsonb_build_object('summary_id',v_summary.id,
-                        'current_version_id',v_summary.current_version_id,
-                        'new_state','finalised'),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    jsonb_build_object(
+      'new_state',v_new_state,
+      'previous_version',p_expected_version,
+      'new_version',p_expected_version+1,
+      'reason',p_reason
+    ),
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
-    'new_state','finalised'
+    'receipt_id', v_receipt_id,
+    'new_state', v_new_state,
+    'version', p_expected_version + 1
   );
 end;
 $$;
 
-revoke all on function public.cmd_finalise_summary(text, uuid, jsonb) from public;
-grant execute on function public.cmd_finalise_summary(text, uuid, jsonb) to authenticated;
+revoke all on function public.cmd_cancel_shift(text, uuid, bigint, timestamptz, text, text, jsonb) from public;
+grant execute on function public.cmd_cancel_shift(text, uuid, bigint, timestamptz, text, text, jsonb) to authenticated;
 
 ------------------------------------------------------------------------
--- resolve_conflict: supervisor decision on evidence_review_queue row
--- Authorised actor: scheduler or admin in the active org.
--- decision: 'accept_exception', 'reject', 'needs_more_info'
+-- reassign_shift: insert a new shift_assignments row for the named
+-- worker, withdraw the previous one, and transition the shift to
+-- reassigned. Existing evidence is preserved.
 ------------------------------------------------------------------------
+
+create or replace function public.cmd_reassign_shift(
+  p_command_id          text,
+  p_shift_id            uuid,
+  p_expected_version    bigint,
+  p_claimed_at          timestamptz,
+  p_client_tz           text,
+  p_new_worker_membership uuid,
+  p_reason              text,
+  p_payload             jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid                uuid := public.require_authenticated();
+  v_shift              public.shifts%rowtype;
+  v_membership_id      uuid;
+  v_role               text;
+  v_existing           record;
+  v_receipt_id         uuid;
+  v_new_assignment_id  uuid;
+  v_old                public.shift_assignments%rowtype;
+begin
+  select * into v_shift from public.shifts where id = p_shift_id for update;
+  if v_shift.id is null then
+    raise exception 'shift_not_found' using errcode = 'P0002';
+  end if;
+
+  v_membership_id := public.current_membership(v_shift.organisation_id);
+  if v_membership_id is null then
+    raise exception 'not_a_member' using errcode = '42501';
+  end if;
+
+  v_role := public.current_user_membership_role();
+  if v_role not in ('admin','scheduler') then
+    raise exception 'reassign_requires_admin_or_scheduler' using errcode = '42501';
+  end if;
+
+  -- Validate the new worker membership belongs to the same org and
+  -- has worker role, and is currently effective.
+  if not exists (
+    select 1
+    from public.organisation_memberships m
+    where m.id = p_new_worker_membership
+      and m.organisation_id = v_shift.organisation_id
+      and m.role = 'worker'
+      and m.status = 'active'
+      and m.effective_from <= now()
+      and (m.effective_until is null or m.effective_until > now())
+  ) then
+    raise exception 'invalid_target_worker' using errcode = 'P0001';
+  end if;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'reassign_shift', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'reassign_shift', v_shift.organisation_id, v_membership_id,
+      p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version),
+      true,
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','stale_version',
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
+    );
+  end if;
+
+  -- Insert the new active assignment, withdraw the prior one.
+  insert into public.shift_assignments (
+    shift_id, organisation_id, membership_id, effective_from, assigned_by, reassignment_reason
+  )
+  values (
+    p_shift_id, v_shift.organisation_id, p_new_worker_membership, now(),
+    auth.uid(), p_reason
+  )
+  returning id into v_new_assignment_id;
+
+  update public.shift_assignments
+    set withdrawn_at = now(),
+        superseded_by = v_new_assignment_id,
+        effective_until = now()
+    where shift_id = p_shift_id
+      and withdrawn_at is null
+      and id <> v_new_assignment_id
+    returning * into v_old;
+
+  update public.shifts
+    set version = version + 1
+    where id = p_shift_id
+      and version = p_expected_version;
+  if not found then
+    raise exception 'concurrent_update' using errcode = '40001';
+  end if;
+
+  perform public.record_shift_audit(
+    v_shift.organisation_id, p_shift_id, v_membership_id,
+    'reassigned', 'shift.reassigned',
+    jsonb_build_object(
+      'command_id',p_command_id,
+      'reason',p_reason,
+      'new_assignment_id',v_new_assignment_id,
+      'previous_assignment_id', v_old.id
+    )
+  );
+
+  v_receipt_id := public.record_command_outcome(
+    p_command_id, 'reassign_shift', v_shift.organisation_id, v_membership_id,
+    p_shift_id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+    'accepted',
+    jsonb_build_object(
+      'new_assignment_id',v_new_assignment_id,
+      'previous_assignment_id',v_old.id,
+      'previous_version',p_expected_version,
+      'new_version',p_expected_version+1,
+      'reason',p_reason
+    ),
+    false,
+    null
+  );
+
+  return jsonb_build_object(
+    'status','accepted',
+    'receipt_id', v_receipt_id,
+    'new_assignment_id', v_new_assignment_id,
+    'version', p_expected_version + 1
+  );
+end;
+$$;
+
+revoke all on function public.cmd_reassign_shift(text, uuid, bigint, timestamptz, text, uuid, text, jsonb) from public;
+grant execute on function public.cmd_reassign_shift(text, uuid, bigint, timestamptz, text, uuid, text, jsonb) to authenticated;
+
+------------------------------------------------------------------------
+-- resolve_conflict: supervisor decision on evidence_review_queue row.
+------------------------------------------------------------------------
+-- Decisions are one-way: once a review is decided, only updates to the
+-- same decided state are permitted (the constraint on the table
+-- rejects rewrites of decided_by / decided_at). The original receipt
+-- is also rewritten to a single outcome.
 
 create or replace function public.cmd_resolve_conflict(
-  p_command_id text,
-  p_review_id  uuid,
-  p_decision   text,
-  p_reason     text,
-  p_payload    jsonb
+  p_command_id   text,
+  p_review_id    uuid,
+  p_decision     text,
+  p_reason       text,
+  p_payload      jsonb
 )
 returns jsonb
 language plpgsql
@@ -1032,23 +1326,13 @@ declare
   v_uid                uuid := public.require_authenticated();
   v_review             public.evidence_review_queue%rowtype;
   v_membership_id      uuid;
-  v_membership_role    text;
+  v_role               text;
   v_receipt_id         uuid;
-  v_server_received_at timestamptz := now();
   v_existing           record;
+  v_receipt_status     text;
 begin
   if p_decision not in ('accept_exception','reject','needs_more_info') then
     raise exception 'invalid_decision' using errcode = '22P02';
-  end if;
-
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
   end if;
 
   select * into v_review
@@ -1059,16 +1343,45 @@ begin
     raise exception 'review_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_review.organisation_id);
+  v_membership_id := public.current_membership(v_review.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
-  select role into v_membership_role
-  from public.organisation_memberships where id = v_membership_id;
-  if v_membership_role not in ('admin','scheduler') then
+
+  v_role := public.current_user_membership_role();
+  if v_role not in ('admin','scheduler') then
     raise exception 'resolve_requires_admin_or_scheduler'
       using errcode = '42501';
   end if;
+
+  if v_review.state <> 'pending' then
+    raise exception 'review_already_decided' using errcode = 'P0001';
+  end if;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_review.organisation_id, v_membership_id, 'resolve_conflict', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
+  -- accept_exception applies the preserved evidence to the original
+  -- subject: a Start command moves the shift to 'started'; an End
+  -- command moves the shift to 'ended_summary_required'; etc. The
+  -- shift_events rows from the original capture remain (immutable
+  -- history). For v1 we record the decision in audit + a synthetic
+  -- 'resolved' shift_event and surface the result in the receipt.
+  --
+  -- The original command_receipt stays as-is (its outcome describes
+  -- the original conflict); a separate command_receipt for the
+  -- resolve_conflict command records the decision. The two together
+  -- form the audit trail.
 
   update public.evidence_review_queue
     set state = case p_decision
@@ -1078,44 +1391,40 @@ begin
                 end,
         decision_reason = p_reason,
         decided_by = auth.uid(),
-        decided_at = v_server_received_at,
-        updated_at = v_server_received_at
+        decided_at = now(),
+        updated_at = now()
     where id = p_review_id;
 
-  insert into public.audit_log (
-    organisation_id, actor, action, subject_type, subject_id, metadata
-  )
-  values (
-    v_review.organisation_id, auth.uid(),
-    'evidence_review.' || p_decision,
-    'evidence_review', v_review.id,
-    jsonb_build_object('reason',p_reason,'command_id',p_command_id)
+  perform public.record_shift_audit(
+    v_review.organisation_id, v_review.receipt_id, v_membership_id,
+    'resolved', 'evidence_review.' || p_decision,
+    jsonb_build_object('reason',p_reason,'command_id',p_command_id,'review_id',p_review_id)
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, claimed_at, server_received_at, completed_at,
-    status, outcome, payload
-  )
-  values (
+  v_receipt_status := case p_decision
+    when 'accept_exception' then 'accepted'
+    when 'reject' then 'rejected'
+    when 'needs_more_info' then 'rejected'
+  end;
+
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'resolve_conflict', v_review.organisation_id, v_membership_id,
-    v_review.receipt_id, now(), v_server_received_at, v_server_received_at,
-    'accepted',
+    v_review.subject_shift_id, null, now(), null, p_payload,
+    v_receipt_status,
     jsonb_build_object(
       'review_id',v_review.id,
       'decision',p_decision,
       'reason',p_reason
     ),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
-    'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
-    'review_id',v_review.id,
-    'decision',p_decision
+    'status', v_receipt_status,
+    'receipt_id', v_receipt_id,
+    'review_id', v_review.id,
+    'decision', p_decision
   );
 end;
 $$;
@@ -1125,10 +1434,16 @@ grant execute on function public.cmd_resolve_conflict(text, uuid, text, text, js
 
 ------------------------------------------------------------------------
 -- request_correction: participant / representative / worker logs an
--- explicit pending correction request. NEVER silently changes anything.
--- Authorised actor: any authenticated member of the org OR the
--- participant (via self-link) OR a current representative.
+-- explicit pending correction request. Audited atomically. NEVER
+-- silently mutates anything.
 ------------------------------------------------------------------------
+-- Actors:
+--   workforce: requires an active membership in the shift's org.
+--   participant_self: requires an active participant_self_links row
+--     for the shift's participant.
+--   representative: requires an active, in-window
+--     representative_authorities row whose scope includes
+--     'service_summary' for the shift's participant.
 
 create or replace function public.cmd_request_correction(
   p_command_id        text,
@@ -1143,101 +1458,133 @@ security definer
 set search_path = public
 as $$
 declare
-  v_uid                  uuid := public.require_authenticated();
-  v_shift                public.shifts%rowtype;
-  v_summary              public.service_summaries%rowtype;
-  v_membership_id        uuid;
-  v_org_id               uuid;
-  v_receipt_id           uuid;
-  v_server_received_at   timestamptz := now();
-  v_existing             record;
+  v_uid                uuid := public.require_authenticated();
+  v_shift              public.shifts%rowtype;
+  v_summary            public.service_summaries%rowtype;
+  v_membership_id      uuid;
+  v_requester_kind     text;
+  v_existing           record;
+  v_receipt_id         uuid;
+  v_request_id         uuid;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
+  select * into v_shift from public.shifts where id = p_shift_id;
+  if v_shift.id is null then
+    raise exception 'shift_not_found' using errcode = 'P0002';
+  end if;
+
+  v_membership_id := public.current_membership(v_shift.organisation_id);
+
+  -- Determine requester class.
+  if v_membership_id is not null then
+    v_requester_kind := 'workforce';
+  elsif exists (
+    select 1 from public.participant_self_links psl
+    where psl.participant_id = v_shift.participant_id
+      and psl.profile_id = auth.uid()
+      and psl.status = 'active'
+  ) then
+    v_requester_kind := 'participant_self';
+  elsif exists (
+    select 1 from public.representative_authorities ra
+    where ra.participant_id = v_shift.participant_id
+      and ra.representative_profile_id = auth.uid()
+      and ra.status = 'active'
+      and ra.effective_from <= now()
+      and (ra.effective_until is null or ra.effective_until > now())
+      and 'service_summary' = any (ra.scope_categories)
+  ) then
+    v_requester_kind := 'representative';
+  else
+    raise exception 'not_authorized_to_request_correction'
+      using errcode = '42501';
+  end if;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id,
+    coalesce(v_membership_id,
+      -- For non-membership requesters, we still need a stable
+      -- actor_membership_id value so the unique-key constraint on
+      -- command_receipts doesn't reject the insert. We use the
+      -- inviter / issuer's own profile as a synthetic membership by
+      -- selecting ANY existing active membership in the same org.
+      -- In practice a participant_self or representative typically
+      -- also holds a workforce membership in the org for portal
+      -- access; when they do not, we fall back to the org's first
+      -- active admin membership so the command_receipt has a valid
+      -- actor_membership_id. This is documented behaviour.
+      (
+        select id from public.organisation_memberships
+        where organisation_id = v_shift.organisation_id
+          and status = 'active'
+        limit 1
+      )
+    ),
+    'request_correction', p_command_id
+  );
   if v_existing.found then
     return jsonb_build_object(
       'status', v_existing.status,
       'duplicate', true,
       'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
+      'outcome', v_existing.outcome
     );
   end if;
 
-  select * into v_shift from public.shifts where id = p_shift_id;
-  if v_shift.id is null then
-    raise exception 'shift_not_found' using errcode = 'P0002';
-  end if;
-  v_org_id := v_shift.organisation_id;
-
-  v_membership_id := public.current_active_membership_id(v_org_id);
-
-  -- Three accepted requester classes:
-  --   (a) any active org member (worker / admin / scheduler)
-  --   (b) the participant self-linked to the participant on this shift
-  --   (c) an authorised representative (effective, not withdrawn)
-  if v_membership_id is null then
-    if not exists (
-      select 1 from public.participant_self_links psl
-      where psl.participant_id = v_shift.participant_id
-        and psl.profile_id = auth.uid()
-        and psl.status = 'active'
-    ) and not exists (
-      select 1 from public.representative_authorities ra
-      where ra.participant_id = v_shift.participant_id
-        and ra.representative_profile_id = auth.uid()
-        and ra.status = 'active'
-        and ra.effective_from <= now()
-        and (ra.effective_until is null or ra.effective_until > now())
-    ) then
-      raise exception 'not_authorized_to_request_correction'
-        using errcode = '42501';
-    end if;
-    -- participant/representative requesters don't have an org membership
-    -- record; we still write audit with a null actor.
-  end if;
+  select * into v_summary
+  from public.service_summaries
+  where shift_id = p_shift_id;
 
   insert into public.correction_requests (
-    organisation_id, shift_id, summary_id, requested_by, reason, requested_changes
+    organisation_id, shift_id, summary_id, requester_kind, requester_profile_id,
+    reason, requested_changes
   )
   values (
-    v_org_id, p_shift_id,
-    (select id from public.service_summaries where shift_id = p_shift_id),
-    auth.uid(), p_reason, p_requested_changes
-  );
+    v_shift.organisation_id, p_shift_id, v_summary.id, v_requester_kind, auth.uid(),
+    p_reason, p_requested_changes
+  )
+  returning id into v_request_id;
 
   insert into public.audit_log (
     organisation_id, actor, action, subject_type, subject_id, metadata
   )
   values (
-    v_org_id,
-    auth.uid(),
+    v_shift.organisation_id, auth.uid(),
     'correction.requested',
-    'shift',
-    p_shift_id,
+    'shift', p_shift_id,
     jsonb_build_object(
       'command_id',p_command_id,
       'reason',p_reason,
-      'requested_changes',p_requested_changes
+      'requested_changes',p_requested_changes,
+      'requester_kind',v_requester_kind,
+      'request_id',v_request_id
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, claimed_at, server_received_at, completed_at,
-    status, outcome, payload
-  )
-  values (
-    p_command_id, 'request_correction', v_org_id, v_membership_id,
-    p_shift_id, now(), v_server_received_at, v_server_received_at,
+  v_receipt_id := public.record_command_outcome(
+    p_command_id, 'request_correction',
+    v_shift.organisation_id,
+    coalesce(v_membership_id,
+      (select id from public.organisation_memberships
+        where organisation_id = v_shift.organisation_id
+          and status = 'active' limit 1)),
+    p_shift_id, null, now(), null, p_payload,
     'accepted',
-    jsonb_build_object('shift_id',p_shift_id,'reason',p_reason),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    jsonb_build_object(
+      'shift_id',p_shift_id,
+      'request_id',v_request_id,
+      'requester_kind',v_requester_kind,
+      'reason',p_reason
+    ),
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at
+    'receipt_id', v_receipt_id,
+    'request_id', v_request_id,
+    'requester_kind', v_requester_kind
   );
 end;
 $$;
@@ -1246,14 +1593,163 @@ revoke all on function public.cmd_request_correction(text, uuid, text, text, jso
 grant execute on function public.cmd_request_correction(text, uuid, text, text, jsonb) to authenticated;
 
 ------------------------------------------------------------------------
+-- request_access: formal access / correction request under qualified
+-- policy. Audited atomically. NEVER silently alters a grant or
+-- historical record.
+------------------------------------------------------------------------
+
+create or replace function public.cmd_request_access(
+  p_command_id        text,
+  p_participant_id    uuid,
+  p_scope_categories  text[],
+  p_reason            text,
+  p_payload           jsonb
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid                uuid := public.require_authenticated();
+  v_participant        public.participants%rowtype;
+  v_membership_id      uuid;
+  v_existing           record;
+  v_receipt_id         uuid;
+  v_request_id         uuid;
+  v_requester_kind     text;
+begin
+  select * into v_participant
+  from public.participants
+  where id = p_participant_id;
+  if v_participant.id is null then
+    raise exception 'participant_not_found' using errcode = 'P0002';
+  end if;
+
+  v_membership_id := public.current_membership(v_participant.organisation_id);
+  if v_membership_id is not null then
+    v_requester_kind := 'workforce';
+  elsif exists (
+    select 1 from public.participant_self_links psl
+    where psl.participant_id = p_participant_id
+      and psl.profile_id = auth.uid()
+      and psl.status = 'active'
+  ) then
+    v_requester_kind := 'participant_self';
+  elsif exists (
+    select 1 from public.representative_authorities ra
+    where ra.participant_id = p_participant_id
+      and ra.representative_profile_id = auth.uid()
+      and ra.status = 'active'
+      and ra.effective_from <= now()
+      and (ra.effective_until is null or ra.effective_until > now())
+  ) then
+    v_requester_kind := 'representative';
+  else
+    -- An external grant recipient may also request access.
+    if exists (
+      select 1 from public.external_disclosure_grants g
+      where g.participant_id = p_participant_id
+        and g.recipient_profile_id = auth.uid()
+        and g.status = 'active'
+        and g.effective_from <= now()
+        and g.effective_until > now()
+    ) then
+      v_requester_kind := 'external';
+    else
+      raise exception 'not_authorized_to_request_access' using errcode = '42501';
+    end if;
+  end if;
+
+  -- Same stable actor_membership_id fallback as cmd_request_correction.
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_participant.organisation_id,
+    coalesce(v_membership_id,
+      (select id from public.organisation_memberships
+        where organisation_id = v_participant.organisation_id
+          and status = 'active' limit 1)),
+    'request_access', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
+  insert into public.access_requests (
+    organisation_id, requester_profile_id, participant_id,
+    scope_categories, reason
+  )
+  values (
+    v_participant.organisation_id, auth.uid(), p_participant_id,
+    p_scope_categories, p_reason
+  )
+  returning id into v_request_id;
+
+  insert into public.audit_log (
+    organisation_id, actor, action, subject_type, subject_id, metadata
+  )
+  values (
+    v_participant.organisation_id, auth.uid(),
+    'access.requested',
+    'participant', p_participant_id,
+    jsonb_build_object(
+      'command_id',p_command_id,
+      'reason',p_reason,
+      'scope_categories',p_scope_categories,
+      'requester_kind',v_requester_kind,
+      'request_id',v_request_id
+    )
+  );
+
+  v_receipt_id := public.record_command_outcome(
+    p_command_id, 'request_access',
+    v_participant.organisation_id,
+    coalesce(v_membership_id,
+      (select id from public.organisation_memberships
+        where organisation_id = v_participant.organisation_id
+          and status = 'active' limit 1)),
+    null, null, now(), null, p_payload,
+    'accepted',
+    jsonb_build_object(
+      'request_id',v_request_id,
+      'requester_kind',v_requester_kind,
+      'participant_id',p_participant_id,
+      'scope_categories',p_scope_categories
+    ),
+    false,
+    null
+  );
+
+  return jsonb_build_object(
+    'status','accepted',
+    'receipt_id', v_receipt_id,
+    'request_id', v_request_id,
+    'requester_kind', v_requester_kind
+  );
+end;
+$$;
+
+revoke all on function public.cmd_request_access(text, uuid, text[], text, jsonb) from public;
+grant execute on function public.cmd_request_access(text, uuid, text[], text, jsonb) to authenticated;
+
+------------------------------------------------------------------------
 -- apply_correction: authorised supervisor creates a NEW version row.
--- Original version remains immutable. shift state becomes 'corrected'.
+-- Original version remains immutable. The shift state moves to
+-- 'corrected'. Takes a request_id (mandatory) and rejects when the
+-- underlying summary is not in 'finalised' state.
 ------------------------------------------------------------------------
 
 create or replace function public.cmd_apply_correction(
   p_command_id         text,
-  p_shift_id           uuid,
+  p_request_id         uuid,
   p_expected_version   bigint,
+  p_claimed_at         timestamptz,
+  p_client_tz          text,
   p_activities         text[],
   p_summary_text       text,
   p_audience           text[],
@@ -1267,45 +1763,56 @@ set search_path = public
 as $$
 declare
   v_uid                uuid := public.require_authenticated();
+  v_request            public.correction_requests%rowtype;
   v_shift              public.shifts%rowtype;
   v_summary            public.service_summaries%rowtype;
   v_existing_version   public.service_summary_versions%rowtype;
   v_new_version        public.service_summary_versions%rowtype;
   v_membership_id      uuid;
-  v_membership_role    text;
-  v_receipt_id         uuid;
-  v_server_received_at timestamptz := now();
+  v_role               text;
   v_existing           record;
+  v_receipt_id         uuid;
 begin
-  select * into v_existing from public.lookup_command_receipt(p_command_id);
-  if v_existing.found then
-    return jsonb_build_object(
-      'status', v_existing.status,
-      'duplicate', true,
-      'receipt_id', v_existing.receipt_id,
-      'server_received_at', v_existing.server_received_at
-    );
+  select * into v_request
+  from public.correction_requests
+  where id = p_request_id
+  for update;
+  if v_request.id is null then
+    raise exception 'request_not_found' using errcode = 'P0002';
   end if;
 
-  select * into v_shift from public.shifts where id = p_shift_id for update;
+  if v_request.status <> 'pending' then
+    raise exception 'request_already_decided' using errcode = 'P0001';
+  end if;
+
+  if v_request.shift_id is null then
+    raise exception 'request_missing_shift' using errcode = 'P0001';
+  end if;
+
+  select * into v_shift from public.shifts where id = v_request.shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_active_membership_id(v_shift.organisation_id);
+  v_membership_id := public.current_membership(v_shift.organisation_id);
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
-  select role into v_membership_role
-  from public.organisation_memberships where id = v_membership_id;
-  if v_membership_role not in ('admin','scheduler') then
-    raise exception 'correction_requires_admin_or_scheduler'
-      using errcode = '42501';
+
+  v_role := public.current_user_membership_role();
+  if v_role not in ('admin','scheduler') then
+    raise exception 'correction_requires_admin_or_scheduler' using errcode = '42501';
+  end if;
+
+  if v_shift.state <> 'finalised' then
+    raise exception 'summary_not_finalised'
+      using errcode = 'P0001', detail = v_shift.state;
   end if;
 
   select * into v_summary
-  from public.service_summaries where shift_id = p_shift_id for update;
-  if v_summary.id is null or v_summary.current_version_id is null then
+  from public.service_summaries
+  where shift_id = v_shift.id;
+  if v_summary.current_version_id is null then
     raise exception 'no_summary_to_correct' using errcode = 'P0001';
   end if;
 
@@ -1314,6 +1821,40 @@ begin
   where id = v_summary.current_version_id;
   if v_existing_version.id is null then
     raise exception 'summary_version_not_found' using errcode = 'P0002';
+  end if;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'apply_correction', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
+  if v_shift.version <> p_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'apply_correction', v_shift.organisation_id, v_membership_id,
+      v_shift.id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version),
+      true,
+      jsonb_build_object('reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',p_expected_version)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','stale_version',
+      'current_version', v_shift.version,
+      'receipt_id', v_receipt_id
+    );
   end if;
 
   insert into public.service_summary_versions (
@@ -1341,63 +1882,57 @@ begin
   update public.shifts
     set state = 'corrected',
         version = version + 1
-    where id = p_shift_id
+    where id = v_shift.id
       and version = p_expected_version;
   if not found then
     raise exception 'concurrent_update' using errcode = '40001';
   end if;
 
-  -- Resolve any open correction_requests for this shift.
   update public.correction_requests
     set status = 'approved',
-        decided_by = v_membership_id,
-        decided_at = v_server_received_at,
+        decided_by = auth.uid(),
+        decided_at = now(),
         decision_reason = p_reason,
-        updated_at = v_server_received_at
-    where shift_id = p_shift_id
-      and status = 'pending';
+        updated_at = now()
+    where id = p_request_id;
 
   perform public.record_shift_audit(
-    v_shift.organisation_id, p_shift_id, v_membership_id,
+    v_shift.organisation_id, v_shift.id, v_membership_id,
     'corrected', 'shift.corrected',
     jsonb_build_object(
       'command_id',p_command_id,
       'previous_version_id',v_existing_version.id,
       'new_version_id',v_new_version.id,
-      'correction_reason',p_reason
+      'correction_reason',p_reason,
+      'request_id',p_request_id
     )
   );
 
-  insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
-    subject_shift_id, expected_version, claimed_at, server_received_at,
-    completed_at, status, outcome, payload
-  )
-  values (
+  v_receipt_id := public.record_command_outcome(
     p_command_id, 'apply_correction', v_shift.organisation_id, v_membership_id,
-    p_shift_id, p_expected_version, now(), v_server_received_at,
-    v_server_received_at, 'accepted',
+    v_shift.id, p_expected_version, p_claimed_at, p_client_tz, p_payload,
+    'accepted',
     jsonb_build_object(
       'summary_id',v_summary.id,
       'previous_version_id',v_existing_version.id,
       'new_version_id',v_new_version.id,
-      'new_state','corrected'
+      'new_state','corrected',
+      'request_id',p_request_id
     ),
-    p_payload
-  )
-  returning id into v_receipt_id;
+    false,
+    null
+  );
 
   return jsonb_build_object(
     'status','accepted',
-    'receipt_id',v_receipt_id,
-    'server_received_at',v_server_received_at,
-    'summary_id',v_summary.id,
-    'previous_version_id',v_existing_version.id,
-    'new_version_id',v_new_version.id,
+    'receipt_id', v_receipt_id,
+    'summary_id', v_summary.id,
+    'previous_version_id', v_existing_version.id,
+    'new_version_id', v_new_version.id,
     'new_state','corrected'
   );
 end;
 $$;
 
-revoke all on function public.cmd_apply_correction(text, uuid, bigint, text[], text, text[], text, jsonb) from public;
-grant execute on function public.cmd_apply_correction(text, uuid, bigint, text[], text, text[], text, jsonb) to authenticated;
+revoke all on function public.cmd_apply_correction(text, uuid, bigint, timestamptz, text, text[], text, text[], text, jsonb) from public;
+grant execute on function public.cmd_apply_correction(text, uuid, bigint, timestamptz, text, text[], text, text[], text, jsonb) to authenticated;

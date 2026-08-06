@@ -6,6 +6,10 @@
  * transition goes through a transactional RPC defined in migration
  * 0005. This module centralises the call signatures so reviewers can
  * see exactly what each command does.
+ *
+ * Parameter names match the SQL function signatures exactly (p_ prefix
+ * convention). PostgREST binds named arguments to function parameters;
+ * the wrappers therefore send the same prefixed keys.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -13,7 +17,10 @@ import type {
   ApplyCorrectionRpcArgs,
   CommandReceipt,
   CommandResult,
+  ReassignShiftRpcArgs,
+  CancelShiftRpcArgs,
   RequestCorrectionRpcArgs,
+  RequestAccessRpcArgs,
   ResolveConflictRpcArgs,
   SubmitSummaryRpcArgs,
   VersionedCommandRpcArgs,
@@ -57,11 +64,20 @@ export async function cmdSubmitSummary(
   return data as CommandResult;
 }
 
-export async function cmdFinaliseSummary(
+export async function cmdCancelShift(
   client: RpcClient,
-  args: Omit<VersionedCommandRpcArgs, "claimed_at" | "client_tz" | "expected_version">,
+  args: CancelShiftRpcArgs,
 ): Promise<CommandResult> {
-  const { data, error } = await client.rpc("cmd_finalise_summary", args);
+  const { data, error } = await client.rpc("cmd_cancel_shift", args);
+  if (error) throw error;
+  return data as CommandResult;
+}
+
+export async function cmdReassignShift(
+  client: RpcClient,
+  args: ReassignShiftRpcArgs,
+): Promise<CommandResult> {
+  const { data, error } = await client.rpc("cmd_reassign_shift", args);
   if (error) throw error;
   return data as CommandResult;
 }
@@ -93,21 +109,36 @@ export async function cmdApplyCorrection(
   return data as CommandResult;
 }
 
+export async function cmdRequestAccess(
+  client: RpcClient,
+  args: RequestAccessRpcArgs,
+): Promise<CommandResult> {
+  const { data, error } = await client.rpc("cmd_request_access", args);
+  if (error) throw error;
+  return data as CommandResult;
+}
+
+export async function cmdAcceptInvitation(
+  client: RpcClient,
+  token: string,
+): Promise<CommandResult> {
+  const { data, error } = await client.rpc("cmd_accept_invitation", {
+    p_token: token,
+  });
+  if (error) throw error;
+  return data as CommandResult;
+}
+
 export async function setActiveOrganisation(
   client: RpcClient,
   organisationId: string,
 ): Promise<void> {
   const { error } = await client.rpc("set_active_organisation", {
-    organisation_id: organisationId,
+    p_organisation_id: organisationId,
   });
   if (error) throw error;
 }
 
-/**
- * Look up the caller's own command receipts — useful for client-side
- * idempotency caches (the same command_id is guaranteed to return the
- * same receipt, so the client only needs to read what it issued).
- */
 export async function listMyReceipts(
   client: RpcClient,
 ): Promise<CommandReceipt[]> {

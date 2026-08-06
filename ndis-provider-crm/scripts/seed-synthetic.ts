@@ -71,6 +71,21 @@ async function main(): Promise<void> {
   const url = requiredEnv("NEXT_PUBLIC_SUPABASE_URL");
   const serviceRoleKey = requiredEnv("SUPABASE_SERVICE_ROLE_KEY");
 
+  // Fail closed: this script is never allowed to run against an unknown or
+  // production-shaped project. The operator must opt in explicitly and mark
+  // the project as a development/synthetic environment.
+  if (process.env.SUPABASE_SYNTHETIC_SEED !== "true") {
+    throw new Error(
+      "Synthetic seed refused: set SUPABASE_SYNTHETIC_SEED=true in the development environment.",
+    );
+  }
+  const isLocal = /localhost|127\.0\.0\.1/.test(url);
+  if (!isLocal && process.env.SUPABASE_PROJECT_ENV !== "development") {
+    throw new Error(
+      "Synthetic seed refused: SUPABASE_PROJECT_ENV must be development for non-local Supabase URLs.",
+    );
+  }
+
   const admin = createClient(url, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
@@ -113,6 +128,18 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // Never attach synthetic authority or operational rows to a real worker.
+  const { data: workerProfile, error: workerProfileErr } = await admin
+    .from("global_profiles")
+    .select("email")
+    .eq("id", workerMembership.profile_id)
+    .maybeSingle();
+  if (workerProfileErr || !workerProfile?.email?.endsWith(".synthetic")) {
+    throw new Error(
+      "Synthetic seed refused: worker membership must belong to a dedicated .synthetic identity.",
+    );
+  }
+
   // 3. Participants (synthetic, no real PII).
   const participantRows = SYNTHETIC_PARTICIPANTS.map((p) => ({
     organisation_id: orgId,
@@ -120,16 +147,38 @@ async function main(): Promise<void> {
     last_initial: p.last_initial,
     created_by: workerMembership.profile_id,
   }));
-  const { data: participants, error: partErr } = await admin
-    .from("participants")
-    .insert(participantRows)
-    .select("id, first_name");
+  const participants: Array<{ id: string; first_name: string }> = [];
+  let partErr: { message: string } | null = null;
+  for (const row of participantRows) {
+    const existing = await admin
+      .from("participants")
+      .select("id, first_name")
+      .eq("organisation_id", row.organisation_id)
+      .eq("first_name", row.first_name)
+      .eq("last_initial", row.last_initial)
+      .is("archived_at", null)
+      .maybeSingle();
+    if (existing.error) {
+      partErr = existing.error;
+      break;
+    }
+    if (existing.data) {
+      participants.push(existing.data as { id: string; first_name: string });
+      continue;
+    }
+    const inserted = await admin
+      .from("participants")
+      .insert(row)
+      .select("id, first_name")
+      .single();
+    if (inserted.error) {
+      partErr = inserted.error;
+      break;
+    }
+    participants.push(inserted.data as { id: string; first_name: string });
+  }
   if (partErr) {
     process.stderr.write(`[seed] participant insert failed: ${partErr.message}\n`);
-    process.exit(1);
-  }
-  if (!participants) {
-    process.stderr.write(`[seed] participant insert returned no rows\n`);
     process.exit(1);
   }
   process.stdout.write(`[seed] inserted ${participants.length} participants\n`);

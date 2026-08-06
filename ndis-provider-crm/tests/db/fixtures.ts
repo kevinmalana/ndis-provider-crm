@@ -102,7 +102,10 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
   for (const [id, name, email] of profileRows) {
     await ex.execAsService(
       `insert into public.global_profiles (id, full_name, email)
-       values ('${id}','${escape(name)}','${email}')`,
+       values ('${id}','${escape(name)}','${email}')
+       on conflict (id) do update
+         set full_name = excluded.full_name,
+             email = excluded.email`,
     );
   }
   // norole deliberately has no global_profiles row.
@@ -223,7 +226,9 @@ export async function seedOrgAInactiveMemberships(ex: Executor): Promise<{
   );
   await ex.execAsService(
     `insert into public.global_profiles (id, full_name, email)
-     values ('${otherWorker}','Other','other@test.example')`,
+     values ('${otherWorker}','Other','other@test.example')
+     on conflict (id) do update set full_name = excluded.full_name,
+       email = excluded.email`,
   );
   await ex.execAsService(
     `insert into public.organisation_memberships

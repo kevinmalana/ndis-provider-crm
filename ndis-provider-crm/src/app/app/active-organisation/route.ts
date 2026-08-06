@@ -25,7 +25,7 @@ export async function POST(request: Request) {
 
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.rpc("set_active_organisation", {
-    organisation_id: organisationId,
+    p_organisation_id: organisationId,
   });
 
   if (error) {
