@@ -100,12 +100,27 @@ and admin clients consume for fully typed queries.
 - `pnpm build` — succeeds
 - `pnpm dev` → `GET /api/health` returns `{ ok: true, supabase: true }`
 
+## Design system
+
+- **Token layer**: `src/styles/tokens.css` is the single source of truth for colour, typography, spacing, radii, motion, and touch targets. Read by Tailwind v4 via `@theme` in `src/app/globals.css`.
+- **Components**: [shadcn/ui](https://ui.shadcn.com) — `radix-vega` preset, configured with the CLI (`pnpm dlx shadcn@latest add …`). Source lives in `src/components/ui/`. The shadcn alias variables (`--background`, `--primary`, …) are mapped onto our tokens in `globals.css`, so re-targeting a token re-skins every component.
+- **Icons**: `lucide-react`. Don't ship inline SVGs for first-class icons.
+- **Font**: Inter via `next/font` (variable, weights 400–700). No runtime Google Fonts requests.
+- **Dev reference**: `pnpm dev` → `http://localhost:3000/design-system` (dev-only — returns null in production). Shows every token visualised plus a sample of each installed shadcn component.
+
+### Adding a new shadcn component
+
+```bash
+pnpm dlx shadcn@latest add <name>
+```
+
+The component lands in `src/components/ui/<name>.tsx` consuming our token alias layer automatically. Update the `/design-system` dev page if you want it represented in the reference sample set.
+
 ## Out of scope (this ticket)
 
 - Full invite-only auth + MFA enforcement
 - Full RLS policy suite beyond organisation scope
-- Tailwind / UI library decision
-- Vercel deployment
+- Vercel deployment (Vercel project is configured; one deploy-debug session still required to clear the 404 in production builds)
 - NDIS-domain features (participants, rosters, service notes)
 
 ## Security
