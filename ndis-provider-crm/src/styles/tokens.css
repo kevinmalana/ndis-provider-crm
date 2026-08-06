@@ -1,0 +1,122 @@
+/*
+ * Design tokens — NDIS Provider CRM
+ *
+ * Single source of truth for colour, typography, spacing, radii, motion, and
+ * touch-target sizing. Tailwind v4 reads these via its CSS-first config in
+ * globals.css; shadcn/ui components consume them via the same @theme block.
+ *
+ * Multi-tenant theming: per-organisation overrides will attach via a
+ * `[data-org="<slug>"]` attribute on <html> and target the same custom
+ * properties (mainly --color-primary, --color-accent, --color-logo-url).
+ * That mechanism is documented here but not implemented in this ticket.
+ */
+
+:root {
+  /* Colour — neutral base, semantic naming
+     Contrast targets: WCAG 2.2 AA (4.5:1 for body text, 3:1 for large/UI).
+     Worker-app primary CTAs go to AAA (7:1) at the call site. */
+  --color-bg: #ffffff;
+  --color-fg: #18181b;
+  --color-muted: #f4f4f5;
+  --color-muted-fg: #52525b;
+  --color-border: #e4e4e7;
+  --color-border-strong: #a1a1aa;
+
+  --color-primary: #18181b;
+  --color-primary-fg: #fafafa;
+  --color-primary-hover: #27272a;
+
+  --color-accent: #2563eb;
+  --color-accent-fg: #ffffff;
+  --color-accent-hover: #1d4ed8;
+
+  --color-success: #16a34a;
+  --color-success-fg: #ffffff;
+  --color-warning: #f59e0b;
+  --color-warning-fg: #1f2937;
+  --color-danger: #dc2626;
+  --color-danger-fg: #ffffff;
+  --color-info: #0ea5e9;
+  --color-info-fg: #ffffff;
+
+  --color-focus-ring: #2563eb;
+
+  /* Typography — Inter is the system font (set via next/font in layout.tsx).
+     Atkinson Hyperlegible is held back for the participant portal (a
+     later accessibility-focused ticket). */
+  --font-sans:
+    var(--font-inter), "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.625;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Spacing — 4 px grid */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+
+  /* Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-full: 9999px;
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --easing-emphasized: cubic-bezier(0.3, 0, 0, 1);
+
+  /* Touch targets — 44 px floor above WCAG 24 px minimum.
+     Worker-app CTAs and form controls must use this minimum. */
+  --touch-min: 44px;
+
+  /* Z-index scale */
+  --z-dropdown: 50;
+  --z-sticky: 100;
+  --z-dialog: 200;
+  --z-toast: 300;
+}
+
+/*
+ * Per-organisation theming hook.
+ * Example (do not enable yet — later ticket):
+ *
+ *   [data-org="acme-ndis"] {
+ *     --color-primary: #0f766e;
+ *     --color-primary-fg: #ffffff;
+ *   }
+ *
+ * The server attaches data-org on <html> after the user's organisation is
+ * resolved. Brand colours must pass contrast validation server-side before
+ * they are accepted; rejected colours fall back to the base value above.
+ */
