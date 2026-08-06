@@ -10,7 +10,7 @@
  *   * Cancellation/reassignment preserves evidence without deleting rows.
  *   * Correction creates a new immutable version, original stays.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import { bootTestDb, type Executor } from "./harness";
 import { seedStandardFixture, type Fixture, TEST_TS } from "./fixtures";
@@ -21,6 +21,10 @@ let fx: Fixture;
 beforeEach(async () => {
   ex = await bootTestDb();
   fx = await seedStandardFixture(ex);
+});
+
+afterEach(async () => {
+  await ex.raw.close();
 });
 
 function iso(t: number): string {
@@ -110,6 +114,24 @@ describe("cmd_on_my_way / cmd_start_shift / cmd_end_shift", () => {
     expect((shiftEvents[0] as { c: number }).c).toBe(1);
   });
 
+  it("receipt lookup is bound to the authenticated actor membership", async () => {
+    ex.setUser(fx.workerAUid);
+    await ex.callRpc("cmd_on_my_way", {
+      command_id: "c-scope-receipt",
+      shift_id: fx.shiftId,
+      claimed_at: iso(TEST_TS.getTime()),
+      client_tz: "Australia/Sydney",
+      payload: { source: "mobile" },
+    });
+    const membershipA = `(select id from public.organisation_memberships where organisation_id = '${fx.orgId}' and profile_id = '${fx.workerAUid}')`;
+    ex.setUser(fx.workerBUid);
+    const { rows } = await ex.exec(
+      `select count(*)::int as c from public.lookup_command_receipt(
+         '${fx.orgId}', ${membershipA}, 'on_my_way', 'c-scope-receipt')`,
+    );
+    expect((rows[0] as { c: number }).c).toBe(0);
+  });
+
   it("stale version returns conflict_preserved and preserves evidence", async () => {
     await startShift();
     ex.setUser(fx.workerAUid);
@@ -126,10 +148,29 @@ describe("cmd_on_my_way / cmd_start_shift / cmd_end_shift", () => {
       reason: "stale_version",
     });
     const { rows } = await ex.execAsService(
-      `select state from public.evidence_review_queue
+      `select id, receipt_id, state from public.evidence_review_queue
         order by created_at desc limit 1`,
     );
     expect((rows[0] as { state: string }).state).toBe("pending");
+
+    ex.setUser(fx.schedulerUid);
+    const resolved = (await ex.callRpc("cmd_resolve_conflict", {
+      command_id: "c-resolve-stale-end",
+      review_id: (rows[0] as { id: string }).id,
+      decision: "accept_exception",
+      reason: "Supervisor accepts the captured end evidence.",
+      payload: { source: "dashboard" },
+    })) as { status: string; authoritative_state: string; original_receipt_id: string };
+    expect(resolved).toMatchObject({
+      status: "accepted",
+      authoritative_state: "ended_summary_required",
+      original_receipt_id: (rows[0] as { receipt_id: string }).receipt_id,
+    });
+
+    const { rows: resolvedShift } = await ex.execAsService(
+      `select state from public.shifts where id = '${fx.shiftId}'`,
+    );
+    expect((resolvedShift[0] as { state: string }).state).toBe("ended_summary_required");
   });
 
   it("non-assigned worker preserves evidence", async () => {
@@ -260,7 +301,7 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
     });
   });
 
-  it("finalise compatibility endpoint is safe for worker retries", async () => {
+  it("finalise compatibility endpoint rejects worker retries", async () => {
     const v = await driveToAwaitingSummary();
     ex.setUser(fx.workerAUid);
     await ex.callRpc("cmd_submit_summary", {
@@ -273,16 +314,68 @@ describe("cmd_submit_summary / finalise / apply_correction", () => {
       audience: ["participant"],
       payload: {},
     });
-    const result = await ex.callRpc("cmd_finalise_summary", {
+    await expect(ex.callRpc("cmd_finalise_summary", {
         command_id: "c-f-bad",
         shift_id: fx.shiftId,
         payload: {},
-      });
-    expect(result).toMatchObject({ status: "accepted", duplicate: true, state: "finalised" });
+      })).rejects.toThrow("finalise_requires_admin_or_scheduler");
+  });
+});
+
+describe("portal request identity and idempotency", () => {
+  it("uses the caller profile, not an arbitrary membership, for access requests", async () => {
+    ex.setUser(fx.representerUid);
+    const first = (await ex.callRpc("cmd_request_access", {
+      command_id: "c-portal-access-1",
+      participant_id: fx.participantId,
+      scope_categories: ["service_summary"],
+      reason: "Need the current summary.",
+      payload: { source: "portal" },
+    })) as { status: string; receipt_id: string; requester_kind: string };
+    const second = (await ex.callRpc("cmd_request_access", {
+      command_id: "c-portal-access-1",
+      participant_id: fx.participantId,
+      scope_categories: ["service_summary"],
+      reason: "Retry",
+      payload: { source: "portal" },
+    })) as { duplicate: boolean; receipt_id: string };
+    expect(first).toMatchObject({ status: "accepted", requester_kind: "representative" });
+    expect(second).toMatchObject({ duplicate: true, receipt_id: first.receipt_id });
+    const { rows } = await ex.execAsService(
+      `select count(*)::int as c from public.access_requests
+        where requester_profile_id = '${fx.representerUid}' and participant_id = '${fx.participantId}'`,
+    );
+    expect((rows[0] as { c: number }).c).toBe(1);
   });
 });
 
 describe("evidence preservation after reassignment", () => {
+  it("preserves a worker command after membership withdrawal", async () => {
+    const startedV = await startShift();
+    await ex.execAsService(
+      `update public.organisation_memberships
+          set status = 'withdrawn', withdrawn_at = now()
+        where organisation_id = '${fx.orgId}'
+          and profile_id = '${fx.workerAUid}'`,
+    );
+    ex.setUser(fx.workerAUid);
+    const result = (await ex.callRpc("cmd_end_shift", {
+      command_id: "c-end-withdrawn",
+      shift_id: fx.shiftId,
+      expected_version: startedV,
+      claimed_at: iso(TEST_TS.getTime()),
+      client_tz: "Australia/Sydney",
+      payload: { source: "offline" },
+    })) as { status: string; receipt_id: string };
+    expect(result.status).toBe("conflict_preserved");
+    expect(result.receipt_id).toBeTruthy();
+    const { rows } = await ex.execAsService(
+      `select count(*)::int as c from public.command_receipts
+        where command_id = 'c-end-withdrawn' and actor_profile_id = '${fx.workerAUid}'`,
+    );
+    expect((rows[0] as { c: number }).c).toBe(1);
+  });
+
   it("cancelled shift preserves evidence rather than dropping it", async () => {
     await startShift();
     // Worker B is reassigned: existing worker A assignment gets

@@ -12,7 +12,7 @@
  *   * External users cannot read non-finalised shifts.
  *   * Expiry + withdrawal revoke on the next read.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import { bootTestDb, type Executor } from "./harness";
 import {
@@ -29,6 +29,10 @@ beforeEach(async () => {
   ex = await bootTestDb();
   fx = await seedStandardFixture(ex);
   other = await seedOrgAInactiveMemberships(ex);
+});
+
+afterEach(async () => {
+  await ex.raw.close();
 });
 
 async function expectRows(
@@ -224,5 +228,63 @@ describe("worker A cannot see worker B's summary", async () => {
       0,
       fx.workerAUid,
     );
+  });
+});
+
+describe("summary version audience access", () => {
+  it("participant, representative, and external users can read the current scoped version", async () => {
+    const summaryId = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    await ex.execAsService(
+      `update public.shifts set state = 'finalised', version = version + 1 where id = '${fx.shiftId}'`,
+    );
+    await ex.execAsService(
+      `insert into public.service_summaries (id, organisation_id, shift_id, finalised_at)
+       values ('${summaryId}', '${fx.orgId}', '${fx.shiftId}', now())`,
+    );
+    await ex.execAsService(
+      `insert into public.service_summary_versions
+         (id, summary_id, version_number, activities, summary_text, audience_categories,
+          author_membership_id, is_correction)
+       values ('${versionId}', '${summaryId}', 1, array['personal_care'], 'Scoped summary',
+          array['participant','service_summary','service_summary_external']::text[],
+          (select id from public.organisation_memberships where organisation_id = '${fx.orgId}' and profile_id = '${fx.workerAUid}'),
+          false)`,
+    );
+    await ex.execAsService(
+      `update public.service_summaries set current_version_id = '${versionId}' where id = '${summaryId}'`,
+    );
+
+    for (const uid of [fx.participantUid, fx.representerUid, fx.externalUid]) {
+      ex.setUser(uid);
+      const { rows } = await ex.exec(
+        `select count(*)::int as c from public.service_summary_current_versions
+          where summary_id = '${summaryId}'`,
+      );
+      expect((rows[0] as { c: number }).c).toBe(1);
+    }
+  });
+
+  it("rejects representative and grant identities from another organisation", async () => {
+    const otherOrg = crypto.randomUUID();
+    await ex.execAsService(
+      `insert into public.organisations (id, name, slug) values ('${otherOrg}', 'Other', '${otherOrg}');`,
+    );
+    await expect(
+      ex.execAsService(
+        `insert into public.representative_authorities
+          (organisation_id, participant_id, representative_profile_id, authority_type, scope_categories)
+         values ('${otherOrg}', '${fx.participantId}', '${fx.representerUid}', 'plan_nominee', array['service_summary']);`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      ex.execAsService(
+        `insert into public.external_disclosure_grants
+          (organisation_id, participant_id, recipient_profile_id, purpose, scope_categories,
+           consent_basis, effective_from, effective_until)
+         values ('${otherOrg}', '${fx.participantId}', '${fx.externalUid}', 'bad tenant', array['service_summary'],
+           'participant', now(), now() + interval '1 day');`,
+      ),
+    ).rejects.toThrow();
   });
 });

@@ -619,6 +619,44 @@ drop policy if exists profiles_select_own_org on public.profiles;
 -- No replacement: legacy profile rows are an audit-only shadow.
 -- Authorised callers can read global_profiles via its own policies.
 
+drop policy if exists invitations_select_admin_or_scheduler on public.invitations;
+create policy invitations_select_admin_or_scheduler
+  on public.invitations for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.organisation_memberships m
+      join public.organisations o on o.id = m.organisation_id
+      where m.organisation_id = public.invitations.organisation_id
+        and m.profile_id = auth.uid()
+        and m.status = 'active'
+        and m.effective_from <= now()
+        and (m.effective_until is null or m.effective_until > now())
+        and o.deleted_at is null
+        and (m.role in ('admin', 'scheduler')
+             or public.membership_has_role(m.id, 'admin')
+             or public.membership_has_role(m.id, 'scheduler'))
+    )
+  );
+
+drop policy if exists audit_log_select_admin on public.audit_log;
+create policy audit_log_select_admin
+  on public.audit_log for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.organisation_memberships m
+      join public.organisations o on o.id = m.organisation_id
+      where m.organisation_id = public.audit_log.organisation_id
+        and m.profile_id = auth.uid()
+        and m.status = 'active'
+        and m.effective_from <= now()
+        and (m.effective_until is null or m.effective_until > now())
+        and o.deleted_at is null
+        and (m.role = 'admin' or public.membership_has_role(m.id, 'admin'))
+    )
+  );
+
 ------------------------------------------------------------------------
 -- 10. RLS on the new tables
 ------------------------------------------------------------------------

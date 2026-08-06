@@ -546,6 +546,57 @@ create policy service_summary_versions_select_worker_assigned
     )
   );
 
+drop policy if exists service_summary_versions_select_participant on public.service_summary_versions;
+create policy service_summary_versions_select_participant
+  on public.service_summary_versions for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.service_summaries ss
+      join public.shifts s on s.id = ss.shift_id
+      where ss.id = public.service_summary_versions.summary_id
+        and s.participant_id in (select public.current_user_self_links_participant_id())
+        and s.state in ('finalised','corrected','cancelled')
+        and 'participant' = any(public.service_summary_versions.audience_categories)
+    )
+  );
+
+drop policy if exists service_summary_versions_select_representative on public.service_summary_versions;
+create policy service_summary_versions_select_representative
+  on public.service_summary_versions for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.service_summaries ss
+      join public.shifts s on s.id = ss.shift_id
+      where ss.id = public.service_summary_versions.summary_id
+        and s.participant_id in (
+          select public.current_user_represents_participant('service_summary')
+        )
+        and s.state in ('finalised','corrected','cancelled')
+        and ('participant' = any(public.service_summary_versions.audience_categories)
+             or 'service_summary' = any(public.service_summary_versions.audience_categories))
+    )
+  );
+
+drop policy if exists service_summary_versions_select_external on public.service_summary_versions;
+create policy service_summary_versions_select_external
+  on public.service_summary_versions for select to authenticated
+  using (
+    exists (
+      select 1
+      from public.service_summaries ss
+      join public.shifts s on s.id = ss.shift_id
+      where ss.id = public.service_summary_versions.summary_id
+        and s.participant_id in (
+          select public.current_user_external_grants_participant('service_summary')
+        )
+        and s.state in ('finalised','corrected','cancelled')
+        and ('service_summary_external' = any(public.service_summary_versions.audience_categories)
+             or 'service_summary' = any(public.service_summary_versions.audience_categories))
+    )
+  );
+
 ------------------------------------------------------------------------
 -- service_summary_current_versions view policies (non-recursive projection)
 ------------------------------------------------------------------------

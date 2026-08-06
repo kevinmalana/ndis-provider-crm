@@ -46,6 +46,7 @@ export type CommandType =
   | "start_shift"
   | "end_shift"
   | "submit_summary"
+  | "finalise_summary"
   | "cancel_shift"
   | "reassign_shift"
   | "resolve_conflict"
@@ -312,7 +313,8 @@ export interface CommandReceipt {
   command_id: string;
   command_type: CommandType;
   organisation_id: UUID;
-  actor_membership_id: UUID;
+  actor_membership_id: UUID | null;
+  actor_profile_id: UUID;
   subject_shift_id: UUID | null;
   subject_review_id: UUID | null;
   subject_request_id: UUID | null;
@@ -430,6 +432,9 @@ export interface CommandResult {
   new_version_id?: UUID;
   review_id?: UUID;
   decision?: string;
+  original_receipt_id?: UUID;
+  authoritative_state?: ShiftState;
+  authoritative_version?: number;
   request_id?: UUID;
   requester_kind?: CorrectionRequesterKind;
   new_assignment_id?: UUID;
@@ -441,6 +446,12 @@ export interface SubmitSummaryRpcArgs extends VersionedCommandRpcArgs {
   p_activities: string[];
   p_summary_text: string;
   p_audience: string[];
+}
+
+export interface FinaliseSummaryRpcArgs {
+  p_command_id: string;
+  p_shift_id: UUID;
+  p_payload: Record<string, unknown>;
 }
 
 export interface CancelShiftRpcArgs extends VersionedCommandRpcArgs {

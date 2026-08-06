@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { bootTestDb } from "./harness";
 
@@ -11,8 +11,11 @@ const UUID = {
   membership: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
 };
 
+let activeEx: Awaited<ReturnType<typeof bootTestDb>> | null = null;
+
 async function seedContext() {
   const ex = await bootTestDb();
+  activeEx = ex;
   await ex.execAsService(
     `insert into auth.users (id, email) values ('${UUID.user}', 'worker@demo.synthetic')`,
   );
@@ -28,6 +31,11 @@ async function seedContext() {
   );
   return ex;
 }
+
+afterEach(async () => {
+  await activeEx?.raw.close();
+  activeEx = null;
+});
 
 describe("synthetic seed transaction contract", () => {
   it("is service-role-only and fail-closed", async () => {
@@ -85,4 +93,3 @@ describe("synthetic seed transaction contract", () => {
     expect(script).not.toContain('.from("shifts").insert');
   });
 });
-

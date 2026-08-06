@@ -11,7 +11,7 @@
  *   * set_active_organisation refuses to leave the user's own active
  *     memberships.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import { bootTestDb, type Executor } from "./harness";
 
@@ -19,6 +19,10 @@ let ex: Executor;
 
 beforeEach(async () => {
   ex = await bootTestDb();
+});
+
+afterEach(async () => {
+  await ex.raw.close();
 });
 
 describe("forward identity migration", () => {
@@ -142,6 +146,45 @@ describe("forward identity migration", () => {
     expect((profiles[0] as { c: number }).c).toBe(1);
   });
 
+  it("enforces one membership per organisation while keeping roles separate", async () => {
+    const userId = "33333333-3333-4333-8333-333333333334";
+    const orgId = "44444444-4444-4444-8444-444444444445";
+    await ex.execAsService(
+      `insert into auth.users (id, email) values ('${userId}','roles@test.example')`,
+    );
+    await ex.execAsService(
+      `insert into public.organisations (id, name, slug) values ('${orgId}','Roles','roles-org')`,
+    );
+    await ex.execAsService(
+      `insert into public.global_profiles (id, email) values ('${userId}','roles@test.example')
+       on conflict (id) do nothing`,
+    );
+    await ex.execAsService(
+      `insert into public.organisation_memberships
+        (organisation_id, profile_id, role, status, effective_from)
+       values ('${orgId}','${userId}','worker','active',now())`,
+    );
+    await expect(
+      ex.execAsService(
+        `insert into public.organisation_memberships
+          (organisation_id, profile_id, role, status, effective_from)
+         values ('${orgId}','${userId}','nominee','active',now())`,
+      ),
+    ).rejects.toThrow();
+    await ex.execAsService(
+      `insert into public.organisation_membership_roles (membership_id, role, status, effective_from)
+       values ((select id from public.organisation_memberships where organisation_id = '${orgId}' and profile_id = '${userId}'),
+               'worker','active',now()),
+              ((select id from public.organisation_memberships where organisation_id = '${orgId}' and profile_id = '${userId}'),
+               'nominee','active',now())`,
+    );
+    const { rows } = await ex.execAsService(
+      `select count(*)::int as c from public.organisation_membership_roles
+        where membership_id = (select id from public.organisation_memberships where organisation_id = '${orgId}' and profile_id = '${userId}')`,
+    );
+    expect((rows[0] as { c: number }).c).toBe(2);
+  });
+
   it("set_active_organisation refuses when caller is not a member", async () => {
     const userId = "66666666-6666-4666-8666-666666666666";
     const orgA = "77777777-7777-4777-8777-777777777777";
@@ -216,5 +259,66 @@ describe("forward identity migration", () => {
         where profile_id = '${userId}'`,
     );
     expect(ctxRows.length).toBe(0);
+  });
+
+  it("invitation and audit RLS ignore forged legacy profile authority", async () => {
+    const adminId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const workerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+    const orgId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
+    await ex.execAsService(
+      `insert into auth.users (id, email) values
+        ('${adminId}','admin-rules@test.example'), ('${workerId}','worker-rules@test.example')`,
+    );
+    await ex.execAsService(
+      `insert into public.organisations (id, name, slug) values ('${orgId}','Rules','rules-org')`,
+    );
+    await ex.execAsService(
+      `insert into public.global_profiles (id, email) values
+        ('${adminId}','admin-rules@test.example'), ('${workerId}','worker-rules@test.example')
+       on conflict (id) do nothing`,
+    );
+    await ex.execAsService(
+      `insert into public.organisation_memberships
+        (organisation_id, profile_id, role, status, effective_from) values
+        ('${orgId}','${adminId}','admin','active',now()),
+        ('${orgId}','${workerId}','worker','active',now())`,
+    );
+    await ex.execAsService(
+      `insert into public.active_organisation_context (profile_id, organisation_id)
+       values ('${adminId}','${orgId}'), ('${workerId}','${orgId}')`,
+    );
+    await ex.execAsService(
+      `insert into public.profiles (id, organisation_id, role, email)
+       values ('${adminId}','${orgId}','admin','admin-rules@test.example'),
+              ('${workerId}','${orgId}','admin','worker-rules@test.example')`,
+    );
+    await ex.execAsService(
+      `insert into public.invitations (organisation_id, email, role, token, expires_at, issued_by)
+       values ('${orgId}','new@test.example','worker','rules-token',now() + interval '1 day','${adminId}')`,
+    );
+    await ex.execAsService(
+      `insert into public.audit_log (organisation_id, actor, action, subject_type)
+       values ('${orgId}','${adminId}','rules.test','organisation')`,
+    );
+
+    ex.setUser(workerId);
+    const { rows: workerInvites } = await ex.exec(
+      `select count(*)::int as c from public.invitations`,
+    );
+    const { rows: workerAudit } = await ex.exec(
+      `select count(*)::int as c from public.audit_log`,
+    );
+    expect((workerInvites[0] as { c: number }).c).toBe(0);
+    expect((workerAudit[0] as { c: number }).c).toBe(0);
+
+    ex.setUser(adminId);
+    const { rows: adminInvites } = await ex.exec(
+      `select count(*)::int as c from public.invitations`,
+    );
+    const { rows: adminAudit } = await ex.exec(
+      `select count(*)::int as c from public.audit_log`,
+    );
+    expect((adminInvites[0] as { c: number }).c).toBe(1);
+    expect((adminAudit[0] as { c: number }).c).toBe(1);
   });
 });

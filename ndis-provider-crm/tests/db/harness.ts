@@ -247,6 +247,15 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_request_access: {
+    params: [
+      { name: "command_id", type: "text" },
+      { name: "participant_id", type: "uuid" },
+      { name: "scope_categories", type: "text[]" },
+      { name: "reason", type: "text" },
+      { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_apply_correction: {
     params: [
       { name: "command_id", type: "text" },

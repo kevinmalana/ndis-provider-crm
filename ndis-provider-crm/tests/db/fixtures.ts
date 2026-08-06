@@ -59,6 +59,8 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     membershipScheduler: cryptoUUID(),
     membershipWorkerA: cryptoUUID(),
     membershipWorkerB: cryptoUUID(),
+    membershipRepresenter: cryptoUUID(),
+    membershipExternal: cryptoUUID(),
     selfLink: cryptoUUID(),
     repAuthority: cryptoUUID(),
     externalGrant: cryptoUUID(),
@@ -118,7 +120,9 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
        ('${ids.membershipAdmin}',    '${ids.org}', '${ids.admin}',     'admin',     'active', now()),
        ('${ids.membershipScheduler}','${ids.org}', '${ids.scheduler}', 'scheduler', 'active', now()),
        ('${ids.membershipWorkerA}',  '${ids.org}', '${ids.workerA}',   'worker',    'active', now()),
-       ('${ids.membershipWorkerB}',  '${ids.org}', '${ids.workerB}',   'worker',    'active', now())`,
+       ('${ids.membershipWorkerB}',  '${ids.org}', '${ids.workerB}',   'worker',    'active', now()),
+       ('${ids.membershipRepresenter}','${ids.org}', '${ids.representer}', 'nominee', 'active', now()),
+       ('${ids.membershipExternal}', '${ids.org}', '${ids.external}', 'external', 'active', now())`,
   );
 
   // Active context for all four (so the helper picks the test org).

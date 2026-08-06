@@ -154,6 +154,10 @@ create table if not exists public.representative_authorities (
   constraint representative_authorities_tenant_match
     foreign key (organisation_id, participant_id)
     references public.participants (organisation_id, id)
+    on delete restrict,
+  constraint representative_authorities_identity_tenant
+    foreign key (organisation_id, representative_profile_id)
+    references public.organisation_memberships (organisation_id, profile_id)
     on delete restrict
 );
 
@@ -203,6 +207,10 @@ create table if not exists public.external_disclosure_grants (
   constraint external_grants_tenant_match
     foreign key (organisation_id, participant_id)
     references public.participants (organisation_id, id)
+    on delete restrict,
+  constraint external_grants_identity_tenant
+    foreign key (organisation_id, recipient_profile_id)
+    references public.organisation_memberships (organisation_id, profile_id)
     on delete restrict
 );
 
@@ -540,13 +548,17 @@ create table if not exists public.command_receipts (
                       'end_shift',
                       'submit_summary',
                       'finalise_summary',
+                      'cancel_shift',
+                      'reassign_shift',
                       'resolve_conflict',
                       'request_correction',
+                      'request_access',
                       'apply_correction',
                       'accept_invitation'
                     )),
   organisation_id   uuid not null references public.organisations (id) on delete restrict,
-  actor_membership_id uuid not null references public.organisation_memberships (id) on delete restrict,
+  actor_membership_id uuid references public.organisation_memberships (id) on delete restrict,
+  actor_profile_id   uuid not null references public.global_profiles (id) on delete restrict,
   subject_shift_id  uuid references public.shifts (id) on delete set null,
   subject_review_id uuid,
   subject_request_id uuid,
@@ -575,6 +587,9 @@ create index if not exists command_receipts_status_idx
 
 create index if not exists command_receipts_receipt_lookup_idx
   on public.command_receipts (organisation_id, actor_membership_id, command_type, command_id);
+
+create unique index if not exists command_receipts_profile_lookup_unique
+  on public.command_receipts (organisation_id, actor_profile_id, command_type, command_id);
 
 ------------------------------------------------------------------------
 -- 11. evidence_review_queue (preserves rejected/conflicting evidence)

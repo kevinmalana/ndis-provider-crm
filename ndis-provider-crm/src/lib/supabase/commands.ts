@@ -17,6 +17,7 @@ import type {
   ApplyCorrectionRpcArgs,
   CommandReceipt,
   CommandResult,
+  FinaliseSummaryRpcArgs,
   ReassignShiftRpcArgs,
   CancelShiftRpcArgs,
   RequestCorrectionRpcArgs,
@@ -60,6 +61,15 @@ export async function cmdSubmitSummary(
   args: SubmitSummaryRpcArgs,
 ): Promise<CommandResult> {
   const { data, error } = await client.rpc("cmd_submit_summary", args);
+  if (error) throw error;
+  return data as CommandResult;
+}
+
+export async function cmdFinaliseSummary(
+  client: RpcClient,
+  args: FinaliseSummaryRpcArgs,
+): Promise<CommandResult> {
+  const { data, error } = await client.rpc("cmd_finalise_summary", args);
   if (error) throw error;
   return data as CommandResult;
 }

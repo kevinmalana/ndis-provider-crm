@@ -98,6 +98,21 @@ as $$
     and r.actor_membership_id = p_actor_membership
     and r.command_type = p_command_type
     and r.command_id = p_command_id
+    and (
+      auth.role() = 'service_role'
+      or exists (
+        select 1
+        from public.organisation_memberships m
+        join public.organisations o on o.id = m.organisation_id
+        where m.id = p_actor_membership
+          and m.organisation_id = p_organisation_id
+          and m.profile_id = auth.uid()
+          and m.status = 'active'
+          and m.effective_from <= now()
+          and (m.effective_until is null or m.effective_until > now())
+          and o.deleted_at is null
+      )
+    )
   limit 1
 $$;
 
@@ -185,12 +200,12 @@ declare
   v_receipt_id uuid;
 begin
   insert into public.command_receipts (
-    command_id, command_type, organisation_id, actor_membership_id,
+    command_id, command_type, organisation_id, actor_membership_id, actor_profile_id,
     subject_shift_id, expected_version, claimed_at, client_tz,
     server_received_at, completed_at, status, outcome, payload
   )
   values (
-    p_command_id, p_command_type, p_organisation_id, p_actor_membership,
+    p_command_id, p_command_type, p_organisation_id, p_actor_membership, auth.uid(),
     p_subject_shift_id, p_expected_version, p_claimed_at, p_client_tz,
     now(), now(), p_status, p_outcome, p_payload
   )
@@ -261,6 +276,27 @@ $$;
 
 revoke all on function public.assert_worker_assignment(uuid, uuid) from public;
 
+-- Preserve the actor dimension for an offline command captured before a
+-- membership was withdrawn or expired. This is not an authorization helper;
+-- callers still require a live assignment before applying state changes.
+create or replace function public.historical_membership(p_organisation_id uuid)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select m.id
+  from public.organisation_memberships m
+  where m.organisation_id = p_organisation_id
+    and m.profile_id = auth.uid()
+  order by m.updated_at desc, m.created_at desc
+  limit 1
+$$;
+
+revoke all on function public.historical_membership(uuid) from public;
+grant execute on function public.historical_membership(uuid) to authenticated;
+
 ------------------------------------------------------------------------
 -- on_my_way: optional, never gates Start
 ------------------------------------------------------------------------
@@ -290,7 +326,8 @@ begin
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_membership(v_shift.organisation_id);
+  v_membership_id := coalesce(public.current_membership(v_shift.organisation_id),
+                              public.historical_membership(v_shift.organisation_id));
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
@@ -430,7 +467,8 @@ begin
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_membership(v_shift.organisation_id);
+  v_membership_id := coalesce(public.current_membership(v_shift.organisation_id),
+                              public.historical_membership(v_shift.organisation_id));
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
@@ -606,7 +644,8 @@ begin
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_membership(v_shift.organisation_id);
+  v_membership_id := coalesce(public.current_membership(v_shift.organisation_id),
+                              public.historical_membership(v_shift.organisation_id));
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
@@ -787,7 +826,8 @@ begin
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
 
-  v_membership_id := public.current_membership(v_shift.organisation_id);
+  v_membership_id := coalesce(public.current_membership(v_shift.organisation_id),
+                              public.historical_membership(v_shift.organisation_id));
   if v_membership_id is null then
     raise exception 'not_a_member' using errcode = '42501';
   end if;
@@ -983,18 +1023,114 @@ security definer
 set search_path = public
 as $$
 declare
-  v_shift public.shifts;
+  v_uid uuid := public.require_authenticated();
+  v_shift public.shifts%rowtype;
+  v_membership_id uuid;
+  v_membership_role text;
+  v_role text;
+  v_existing record;
+  v_receipt_id uuid;
+  v_expected_version bigint;
 begin
   select * into v_shift from public.shifts where id = p_shift_id for update;
   if v_shift.id is null then
     raise exception 'shift_not_found' using errcode = 'P0002';
   end if;
-  if v_shift.state not in ('finalised','corrected','cancelled') then
-    raise exception 'summary_not_ready' using errcode = 'P0001';
+
+  v_membership_id := public.current_membership(v_shift.organisation_id);
+  if v_membership_id is not null then
+    select m.role into v_membership_role
+    from public.organisation_memberships m
+    where m.id = v_membership_id
+      and m.profile_id = v_uid
+      and m.organisation_id = v_shift.organisation_id;
+    if v_membership_role not in ('admin','scheduler','worker') then
+      v_membership_id := null;
+    end if;
   end if;
+  if v_membership_id is null then
+    raise exception 'not_a_member' using errcode = '42501';
+  end if;
+  select m.role into v_role
+  from public.organisation_memberships m
+  where m.id = v_membership_id
+    and m.profile_id = v_uid
+    and m.organisation_id = v_shift.organisation_id;
+  if v_role not in ('admin','scheduler') then
+    raise exception 'finalise_requires_admin_or_scheduler' using errcode = '42501';
+  end if;
+
+  select * into v_existing
+  from public.lookup_command_receipt(
+    v_shift.organisation_id, v_membership_id, 'finalise_summary', p_command_id
+  );
+  if v_existing.found then
+    return jsonb_build_object(
+      'status', v_existing.status,
+      'duplicate', true,
+      'receipt_id', v_existing.receipt_id,
+      'outcome', v_existing.outcome
+    );
+  end if;
+
+  if p_payload ? 'expected_version' then
+    v_expected_version := (p_payload ->> 'expected_version')::bigint;
+  end if;
+  if v_expected_version is not null and v_shift.version <> v_expected_version then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'finalise_summary', v_shift.organisation_id, v_membership_id,
+      p_shift_id, v_expected_version, now(), null, p_payload,
+      'conflict_preserved',
+      jsonb_build_object(
+        'reason','stale_version',
+        'current_version',v_shift.version,
+        'claimed_version',v_expected_version
+      ),
+      true,
+      jsonb_build_object('current_version',v_shift.version,'claimed_version',v_expected_version)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','stale_version',
+      'receipt_id',v_receipt_id,
+      'current_version',v_shift.version
+    );
+  end if;
+
+  if v_shift.state not in ('finalised','corrected','cancelled') then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'finalise_summary', v_shift.organisation_id, v_membership_id,
+      p_shift_id, v_expected_version, now(), null, p_payload,
+      'conflict_preserved',
+      jsonb_build_object('reason','summary_not_ready','state',v_shift.state),
+      true,
+      jsonb_build_object('state',v_shift.state)
+    );
+    return jsonb_build_object(
+      'status','conflict_preserved',
+      'reason','summary_not_ready',
+      'receipt_id',v_receipt_id,
+      'state',v_shift.state
+    );
+  end if;
+
+  perform public.record_shift_audit(
+    v_shift.organisation_id, p_shift_id, v_membership_id,
+    'summary_finalised', 'shift.summary_finalised.compatibility',
+    jsonb_build_object('command_id',p_command_id,'version',v_shift.version)
+  );
+  v_receipt_id := public.record_command_outcome(
+    p_command_id, 'finalise_summary', v_shift.organisation_id, v_membership_id,
+    p_shift_id, v_expected_version, now(), null, p_payload,
+    'accepted',
+    jsonb_build_object('state',v_shift.state,'version',v_shift.version,'duplicate',true),
+    false,
+    null
+  );
   return jsonb_build_object('status','accepted','duplicate',true,
                             'command_id',p_command_id,'shift_id',p_shift_id,
-                            'state',v_shift.state,'version',v_shift.version);
+                            'state',v_shift.state,'version',v_shift.version,
+                            'receipt_id',v_receipt_id);
 end;
 $$;
 
@@ -1325,11 +1461,14 @@ as $$
 declare
   v_uid                uuid := public.require_authenticated();
   v_review             public.evidence_review_queue%rowtype;
+  v_original           public.command_receipts%rowtype;
+  v_shift              public.shifts%rowtype;
   v_membership_id      uuid;
   v_role               text;
   v_receipt_id         uuid;
   v_existing           record;
   v_receipt_status     text;
+  v_authoritative_state text;
 begin
   if p_decision not in ('accept_exception','reject','needs_more_info') then
     raise exception 'invalid_decision' using errcode = '22P02';
@@ -1358,6 +1497,22 @@ begin
     raise exception 'review_already_decided' using errcode = 'P0001';
   end if;
 
+  select * into v_original
+  from public.command_receipts
+  where id = v_review.receipt_id
+  for share;
+  if v_original.id is null then
+    raise exception 'original_receipt_not_found' using errcode = 'P0002';
+  end if;
+
+  if v_original.subject_shift_id is not null then
+    select * into v_shift
+    from public.shifts
+    where id = v_original.subject_shift_id
+      and organisation_id = v_review.organisation_id
+    for update;
+  end if;
+
   select * into v_existing
   from public.lookup_command_receipt(
     v_review.organisation_id, v_membership_id, 'resolve_conflict', p_command_id
@@ -1372,16 +1527,26 @@ begin
   end if;
 
   -- accept_exception applies the preserved evidence to the original
-  -- subject: a Start command moves the shift to 'started'; an End
-  -- command moves the shift to 'ended_summary_required'; etc. The
-  -- shift_events rows from the original capture remain (immutable
-  -- history). For v1 we record the decision in audit + a synthetic
-  -- 'resolved' shift_event and surface the result in the receipt.
-  --
-  -- The original command_receipt stays as-is (its outcome describes
-  -- the original conflict); a separate command_receipt for the
-  -- resolve_conflict command records the decision. The two together
-  -- form the audit trail.
+  -- subject when the command has an authoritative shift transition.
+  -- The original receipt remains immutable; this decision receipt links
+  -- back to it and records the resulting state/version.
+  if p_decision = 'accept_exception' and v_shift.id is not null then
+    v_authoritative_state := case v_original.command_type
+      when 'start_shift' then 'started'
+      when 'end_shift' then 'ended_summary_required'
+      when 'cancel_shift' then 'cancelled'
+      else null
+    end;
+    if v_authoritative_state is not null
+       and v_shift.state not in ('finalised','corrected','cancelled') then
+      update public.shifts
+        set state = v_authoritative_state,
+            version = version + 1
+        where id = v_shift.id;
+      v_shift.state := v_authoritative_state;
+      v_shift.version := v_shift.version + 1;
+    end if;
+  end if;
 
   update public.evidence_review_queue
     set state = case p_decision
@@ -1395,11 +1560,20 @@ begin
         updated_at = now()
     where id = p_review_id;
 
-  perform public.record_shift_audit(
-    v_review.organisation_id, v_review.receipt_id, v_membership_id,
-    'resolved', 'evidence_review.' || p_decision,
-    jsonb_build_object('reason',p_reason,'command_id',p_command_id,'review_id',p_review_id)
-  );
+  if v_original.subject_shift_id is not null then
+    perform public.record_shift_audit(
+      v_review.organisation_id, v_original.subject_shift_id, v_membership_id,
+      'resolved', 'evidence_review.' || p_decision,
+      jsonb_build_object(
+        'reason',p_reason,
+        'command_id',p_command_id,
+        'review_id',p_review_id,
+        'original_receipt_id',v_original.id,
+        'authoritative_state',v_authoritative_state,
+        'authoritative_version',case when v_shift.id is null then null else v_shift.version end
+      )
+    );
+  end if;
 
   v_receipt_status := case p_decision
     when 'accept_exception' then 'accepted'
@@ -1409,12 +1583,15 @@ begin
 
   v_receipt_id := public.record_command_outcome(
     p_command_id, 'resolve_conflict', v_review.organisation_id, v_membership_id,
-    v_review.subject_shift_id, null, now(), null, p_payload,
+    v_original.subject_shift_id, null, now(), null, p_payload,
     v_receipt_status,
     jsonb_build_object(
       'review_id',v_review.id,
       'decision',p_decision,
-      'reason',p_reason
+      'reason',p_reason,
+      'original_receipt_id',v_original.id,
+      'authoritative_state',v_authoritative_state,
+      'authoritative_version',case when v_shift.id is null then null else v_shift.version end
     ),
     false,
     null
@@ -1424,7 +1601,10 @@ begin
     'status', v_receipt_status,
     'receipt_id', v_receipt_id,
     'review_id', v_review.id,
-    'decision', p_decision
+    'decision', p_decision,
+    'original_receipt_id', v_original.id,
+    'authoritative_state', v_authoritative_state,
+    'authoritative_version', case when v_shift.id is null then null else v_shift.version end
   );
 end;
 $$;
@@ -1437,6 +1617,80 @@ grant execute on function public.cmd_resolve_conflict(text, uuid, text, text, js
 -- explicit pending correction request. Audited atomically. NEVER
 -- silently mutates anything.
 ------------------------------------------------------------------------
+
+-- Non-membership portal actors use their immutable profile identity as the
+-- idempotency dimension. They never borrow another person's membership.
+create or replace function public.lookup_command_receipt_profile(
+  p_organisation_id uuid,
+  p_actor_profile    uuid,
+  p_command_type    text,
+  p_command_id      text
+)
+returns table (
+  found boolean,
+  status text,
+  outcome jsonb,
+  receipt_id uuid,
+  server_received_at timestamptz,
+  subject_shift_id uuid
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select true, r.status, r.outcome, r.id, r.server_received_at, r.subject_shift_id
+  from public.command_receipts r
+  where r.organisation_id = p_organisation_id
+    and r.actor_profile_id = p_actor_profile
+    and r.command_type = p_command_type
+    and r.command_id = p_command_id
+    and (auth.role() = 'service_role' or p_actor_profile = auth.uid())
+  limit 1
+$$;
+
+revoke all on function public.lookup_command_receipt_profile(uuid, uuid, text, text) from public;
+grant execute on function public.lookup_command_receipt_profile(uuid, uuid, text, text) to authenticated;
+
+create or replace function public.record_command_outcome_profile(
+  p_command_id text,
+  p_command_type text,
+  p_organisation_id uuid,
+  p_actor_profile uuid,
+  p_subject_shift_id uuid,
+  p_payload jsonb,
+  p_status text,
+  p_outcome jsonb
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_receipt_id uuid;
+begin
+  if auth.role() <> 'service_role' and p_actor_profile <> auth.uid() then
+    raise exception 'actor_profile_mismatch' using errcode = '42501';
+  end if;
+  insert into public.command_receipts (
+    command_id, command_type, organisation_id, actor_membership_id,
+    actor_profile_id, subject_shift_id, claimed_at, server_received_at,
+    completed_at, status, outcome, payload
+  ) values (
+    p_command_id, p_command_type, p_organisation_id, null, p_actor_profile,
+    p_subject_shift_id, now(), now(), now(), p_status, p_outcome,
+    coalesce(p_payload, '{}'::jsonb)
+  )
+  on conflict (organisation_id, actor_profile_id, command_type, command_id)
+  do update set server_received_at = public.command_receipts.server_received_at
+  returning id into v_receipt_id;
+  return v_receipt_id;
+end;
+$$;
+
+revoke all on function public.record_command_outcome_profile(text, text, uuid, uuid, uuid, jsonb, text, jsonb) from public;
+
 -- Actors:
 --   workforce: requires an active membership in the shift's org.
 --   participant_self: requires an active participant_self_links row
@@ -1462,6 +1716,7 @@ declare
   v_shift              public.shifts%rowtype;
   v_summary            public.service_summaries%rowtype;
   v_membership_id      uuid;
+  v_membership_role    text;
   v_requester_kind     text;
   v_existing           record;
   v_receipt_id         uuid;
@@ -1473,6 +1728,16 @@ begin
   end if;
 
   v_membership_id := public.current_membership(v_shift.organisation_id);
+  if v_membership_id is not null then
+    select m.role into v_membership_role
+    from public.organisation_memberships m
+    where m.id = v_membership_id
+      and m.profile_id = v_uid
+      and m.organisation_id = v_shift.organisation_id;
+    if v_membership_role not in ('admin','scheduler','worker') then
+      v_membership_id := null;
+    end if;
+  end if;
 
   -- Determine requester class.
   if v_membership_id is not null then
@@ -1499,29 +1764,15 @@ begin
       using errcode = '42501';
   end if;
 
-  select * into v_existing
-  from public.lookup_command_receipt(
-    v_shift.organisation_id,
-    coalesce(v_membership_id,
-      -- For non-membership requesters, we still need a stable
-      -- actor_membership_id value so the unique-key constraint on
-      -- command_receipts doesn't reject the insert. We use the
-      -- inviter / issuer's own profile as a synthetic membership by
-      -- selecting ANY existing active membership in the same org.
-      -- In practice a participant_self or representative typically
-      -- also holds a workforce membership in the org for portal
-      -- access; when they do not, we fall back to the org's first
-      -- active admin membership so the command_receipt has a valid
-      -- actor_membership_id. This is documented behaviour.
-      (
-        select id from public.organisation_memberships
-        where organisation_id = v_shift.organisation_id
-          and status = 'active'
-        limit 1
-      )
-    ),
-    'request_correction', p_command_id
-  );
+  if v_membership_id is not null then
+    select * into v_existing from public.lookup_command_receipt(
+      v_shift.organisation_id, v_membership_id, 'request_correction', p_command_id
+    );
+  else
+    select * into v_existing from public.lookup_command_receipt_profile(
+      v_shift.organisation_id, v_uid, 'request_correction', p_command_id
+    );
+  end if;
   if v_existing.found then
     return jsonb_build_object(
       'status', v_existing.status,
@@ -1561,24 +1812,19 @@ begin
     )
   );
 
-  v_receipt_id := public.record_command_outcome(
-    p_command_id, 'request_correction',
-    v_shift.organisation_id,
-    coalesce(v_membership_id,
-      (select id from public.organisation_memberships
-        where organisation_id = v_shift.organisation_id
-          and status = 'active' limit 1)),
-    p_shift_id, null, now(), null, p_payload,
-    'accepted',
-    jsonb_build_object(
-      'shift_id',p_shift_id,
-      'request_id',v_request_id,
-      'requester_kind',v_requester_kind,
-      'reason',p_reason
-    ),
-    false,
-    null
-  );
+  if v_membership_id is not null then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'request_correction', v_shift.organisation_id, v_membership_id,
+      p_shift_id, null, now(), null, p_payload, 'accepted',
+      jsonb_build_object('shift_id',p_shift_id,'request_id',v_request_id,
+        'requester_kind',v_requester_kind,'reason',p_reason), false, null);
+  else
+    v_receipt_id := public.record_command_outcome_profile(
+      p_command_id, 'request_correction', v_shift.organisation_id, v_uid,
+      p_shift_id, p_payload, 'accepted',
+      jsonb_build_object('shift_id',p_shift_id,'request_id',v_request_id,
+        'requester_kind',v_requester_kind,'reason',p_reason));
+  end if;
 
   return jsonb_build_object(
     'status','accepted',
@@ -1614,6 +1860,7 @@ declare
   v_uid                uuid := public.require_authenticated();
   v_participant        public.participants%rowtype;
   v_membership_id      uuid;
+  v_membership_role    text;
   v_existing           record;
   v_receipt_id         uuid;
   v_request_id         uuid;
@@ -1627,6 +1874,16 @@ begin
   end if;
 
   v_membership_id := public.current_membership(v_participant.organisation_id);
+  if v_membership_id is not null then
+    select m.role into v_membership_role
+    from public.organisation_memberships m
+    where m.id = v_membership_id
+      and m.profile_id = v_uid
+      and m.organisation_id = v_participant.organisation_id;
+    if v_membership_role not in ('admin','scheduler','worker') then
+      v_membership_id := null;
+    end if;
+  end if;
   if v_membership_id is not null then
     v_requester_kind := 'workforce';
   elsif exists (
@@ -1661,16 +1918,13 @@ begin
     end if;
   end if;
 
-  -- Same stable actor_membership_id fallback as cmd_request_correction.
-  select * into v_existing
-  from public.lookup_command_receipt(
-    v_participant.organisation_id,
-    coalesce(v_membership_id,
-      (select id from public.organisation_memberships
-        where organisation_id = v_participant.organisation_id
-          and status = 'active' limit 1)),
-    'request_access', p_command_id
-  );
+  if v_membership_id is not null then
+    select * into v_existing from public.lookup_command_receipt(
+      v_participant.organisation_id, v_membership_id, 'request_access', p_command_id);
+  else
+    select * into v_existing from public.lookup_command_receipt_profile(
+      v_participant.organisation_id, v_uid, 'request_access', p_command_id);
+  end if;
   if v_existing.found then
     return jsonb_build_object(
       'status', v_existing.status,
@@ -1706,24 +1960,19 @@ begin
     )
   );
 
-  v_receipt_id := public.record_command_outcome(
-    p_command_id, 'request_access',
-    v_participant.organisation_id,
-    coalesce(v_membership_id,
-      (select id from public.organisation_memberships
-        where organisation_id = v_participant.organisation_id
-          and status = 'active' limit 1)),
-    null, null, now(), null, p_payload,
-    'accepted',
-    jsonb_build_object(
-      'request_id',v_request_id,
-      'requester_kind',v_requester_kind,
-      'participant_id',p_participant_id,
-      'scope_categories',p_scope_categories
-    ),
-    false,
-    null
-  );
+  if v_membership_id is not null then
+    v_receipt_id := public.record_command_outcome(
+      p_command_id, 'request_access', v_participant.organisation_id, v_membership_id,
+      null, null, now(), null, p_payload, 'accepted',
+      jsonb_build_object('request_id',v_request_id,'requester_kind',v_requester_kind,
+        'participant_id',p_participant_id,'scope_categories',p_scope_categories), false, null);
+  else
+    v_receipt_id := public.record_command_outcome_profile(
+      p_command_id, 'request_access', v_participant.organisation_id, v_uid,
+      null, p_payload, 'accepted',
+      jsonb_build_object('request_id',v_request_id,'requester_kind',v_requester_kind,
+        'participant_id',p_participant_id,'scope_categories',p_scope_categories));
+  end if;
 
   return jsonb_build_object(
     'status','accepted',
