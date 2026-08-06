@@ -128,8 +128,30 @@ SQL migrations live in `supabase/migrations/`:
   `current_user_role()`, `is_invitation_valid()`,
   `get_invitation_view()`, `soft_delete_organisation()`, and the real
   invitation-matching `handle_new_user` flow.
+- `0003_forward_identity.sql` — global profiles + organisation
+  memberships + active organisation context, `set_active_organisation()`
+  RPC, refines `handle_new_user` so a second invitation creates a new
+  membership rather than colliding with the legacy single-org profile.
+  Preserves every existing identity / invitation / audit row.
+- `0004_v1_domain_tables.sql` — participants, participant self-links,
+  representative authorities, external disclosure grants, worker
+  availability, shifts + shift assignments, critical-info cards,
+  service summaries + immutable versions, command receipts,
+  evidence review queue, correction / access requests, shift events.
+- `0005_sensitive_command_rpcs.sql` — transactional Postgres RPCs for
+  every sensitive state change (`cmd_on_my_way`, `cmd_start_shift`,
+  `cmd_end_shift`, `cmd_submit_summary`, `cmd_finalise_summary`,
+  `cmd_resolve_conflict`, `cmd_request_correction`, `cmd_apply_correction`).
+  Each validates active membership + assignment + expected version,
+  deduplicates by `command_id`, records client and server times, applies
+  one transition, appends audit + shift events, and routes conflicts to
+  the evidence review queue.
+- `0006_access_matrix_rls.sql` — RLS policies that distinguish workforce,
+  participant self-link, representative authority, and external grant
+  paths. Never trusts the active-organisation context for authorisation.
 
-Apply with the Supabase CLI as above.
+Apply with the Supabase CLI as above. Local testing uses an in-memory
+pglite instance — no remote database is touched during CI.
 
 ## Type generation
 
@@ -151,8 +173,11 @@ and admin clients consume for fully typed queries.
 | `pnpm start` | Run the production build |
 | `pnpm lint` | ESLint (`eslint-config-next`) |
 | `pnpm typecheck` | TypeScript check (no emit) |
+| `pnpm db:parse` | Static SQL syntax check via `libpg-query` for every migration |
+| `pnpm db:test` | Vitest suite against an isolated pglite database — exercises every RLS policy and transactional RPC contract |
 | `pnpm db:types` | Regenerate `src/lib/supabase/types.gen.ts` from the linked Supabase project |
 | `pnpm bootstrap` | One-shot: create founding tenant + first admin invitation (prints URL to stdout) |
+| `pnpm seed:synthetic` | Synthetic-only dev seed (no real participant data) for worker / admin demo flows |
 
 ## Quality gates (must pass)
 
@@ -160,6 +185,8 @@ and admin clients consume for fully typed queries.
 - `pnpm typecheck` — clean
 - `pnpm build` — succeeds
 - `pnpm install --frozen-lockfile` on a clean `node_modules` — succeeds
+- `pnpm db:parse` — every migration parses as valid Postgres SQL
+- `pnpm db:test` — all RLS / RPC contract tests pass against pglite
 - `pnpm dev` → `GET /api/health` returns `{ ok: true, supabase: true }`
 
 ## Design system
