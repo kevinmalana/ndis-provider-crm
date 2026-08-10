@@ -239,6 +239,13 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "evidence_reference", type: "text" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_admin_renew_consent: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "consent_id", type: "uuid" },
+      { name: "expected_current_consent_id", type: "uuid" }, { name: "purpose", type: "text" }, { name: "scope_categories", type: "text[]" },
+      { name: "evidence_reference", type: "text" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_admin_revoke_grant: {
     params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "grant_id", type: "uuid" },
