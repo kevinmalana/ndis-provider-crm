@@ -289,6 +289,86 @@ describe("mounted AdminWorkspace — complete provider readiness surface", () =>
     expect(screen.getByText(/participant_self_link \/ self-link-1/i)).toBeInTheDocument();
     expect(screen.getByText(/record COMP-1 · issuer Training provider · verifier Verifier B/i)).toBeInTheDocument();
   });
+
+  it("submits non-default controlled assessment and competence expiry dates", async () => {
+    rpcMock.mockResolvedValue({ data: { status: "accepted" }, error: null });
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={readinessData} />);
+    await clickTab("Readiness");
+
+    const assessmentDate = "2026-07-14T09:30";
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Risk-assessed role title"), { target: { value: "Complex support worker" } });
+      fireEvent.change(screen.getByLabelText("Role definition basis"), { target: { value: "Provider risk review" } });
+      fireEvent.change(screen.getByLabelText("Role description"), { target: { value: "Complex supports" } });
+      fireEvent.change(screen.getByLabelText("Role assessor"), { target: { value: "Assessment Lead" } });
+      fireEvent.change(screen.getByLabelText("Assessor title"), { target: { value: "Clinical Director" } });
+      fireEvent.change(screen.getByLabelText("Assessment date"), { target: { value: assessmentDate } });
+      fireEvent.submit(screen.getByRole("button", { name: "Define risk-assessed role" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    expect(rpcMock.mock.calls[0][0]).toBe("cmd_admin_create_risk_role");
+    expect(rpcMock.mock.calls[0][1]).toMatchObject({ p_assessed_at: new Date(assessmentDate).toISOString() });
+
+    const evidenceExpiry = "2027-02-03T17:45";
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Worker"), { target: { value: "m-worker-1" } });
+      fireEvent.change(screen.getByLabelText("Required competence"), { target: { value: "requirement-1" } });
+      fireEvent.change(screen.getByLabelText("Evidence issuer"), { target: { value: "Training Provider" } });
+      fireEvent.change(screen.getByLabelText("Evidence verifier"), { target: { value: "Verifier A" } });
+      fireEvent.change(screen.getByLabelText("Evidence reference"), { target: { value: "COMP-DATED" } });
+      fireEvent.change(screen.getByLabelText("Evidence expiry"), { target: { value: evidenceExpiry } });
+      fireEvent.submit(screen.getByRole("button", { name: "Record competence evidence" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    expect(rpcMock.mock.calls[1][0]).toBe("cmd_admin_record_competence_evidence");
+    expect(rpcMock.mock.calls[1][1]).toMatchObject({ p_expires_at: new Date(evidenceExpiry).toISOString() });
+  });
+
+  it("keeps lifecycle context values isolated from readiness context selection", async () => {
+    const twoContextData = {
+      ...readinessData,
+      serviceContexts: [
+        ...readinessData.serviceContexts,
+        { id: "ctx-2", participant_id: "p-1", capability_id: "cap-1", catalogue_item_id: "item-1", role_version_id: "role-2", jurisdiction: "VIC", owner_profile_id: "admin-1", reviewer_profile_id: "admin-1", goal_reference: "Goal 2", lifecycle_state: "review_required" },
+      ],
+      roles: [...readinessData.roles, { id: "role-2", title: "Alternate worker", risk_assessed: true, status: "active" }],
+    };
+    rpcMock.mockResolvedValue({ data: { status: "accepted" }, error: null });
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={twoContextData} />);
+    await clickTab("Readiness");
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Service context"), { target: { value: "ctx-1" } });
+      fireEvent.change(screen.getByLabelText("Readiness context"), { target: { value: "ctx-2" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Save context lifecycle" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    expect(rpcMock.mock.calls[0][0]).toBe("cmd_admin_update_service_context_state");
+    expect(rpcMock.mock.calls[0][1]).toMatchObject({
+      p_context_id: "ctx-1",
+      p_reviewer_profile_id: "scheduler-1",
+      p_role_version_id: "role-1",
+      p_jurisdiction: "NSW",
+    });
+    expect(rpcMock.mock.calls[0][1]).not.toMatchObject({ p_context_id: "ctx-2" });
+    expect(rpcMock.mock.calls[0][1]).not.toMatchObject({ p_reviewer_profile_id: "admin-1" });
+    expect(rpcMock.mock.calls[0][1]).not.toMatchObject({ p_role_version_id: "role-2" });
+    expect(rpcMock.mock.calls[0][1]).not.toMatchObject({ p_jurisdiction: "VIC" });
+  });
+
+  it("renders clearance expiry and pathway validity windows in the audit card", async () => {
+    const auditWindowData = {
+      ...readinessData,
+      screeningVerifications: [{ ...readinessData.screeningVerifications[0], clearance_expires_at: "2027-06-30T23:59:00Z" }],
+      screeningPathways: [{ id: "pathway-1", worker_membership_id: "m-worker-1", role_version_id: "role-1", pathway: "working_on_application", jurisdiction: "NSW", application_placement_contract_reference: "APP-1", pathway_start: "2026-08-15T00:00:00Z", pathway_end: "2026-12-15T23:59:00Z", supervisor_membership_id: "m-admin-1", supervisor_clearance_reference: "SUP-1", risk_management_plan_reference: "RISK-1", effective_from: "2026-08-01T00:00:00Z", effective_until: "2027-01-01T00:00:00Z" }],
+    };
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={auditWindowData} />);
+    await clickTab("Readiness");
+
+    expect(screen.getByText(/Clearance expires 2027-06-30T23:59:00Z/)).toBeInTheDocument();
+    expect(screen.getByText(/Pathway valid from 2026-08-15T00:00:00Z/)).toBeInTheDocument();
+    expect(screen.getByText(/Pathway valid to 2026-12-15T23:59:00Z/)).toBeInTheDocument();
+  });
 });
 
 afterEach(() => {
