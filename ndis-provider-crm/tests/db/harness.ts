@@ -83,7 +83,7 @@ const AUTH_SCHEMA_SQL = `
   grant execute on function auth.role() to public;
 `;
 
-export async function bootTestDb(): Promise<Executor> {
+export async function bootTestDb(options: { through?: string } = {}): Promise<Executor> {
   const pg = new PGlite();
 
   await pg.exec(AUTH_SCHEMA_SQL);
@@ -94,6 +94,7 @@ export async function bootTestDb(): Promise<Executor> {
   for (const file of migrations) {
     const sql = fs.readFileSync(file, "utf8");
     await pg.exec(sql);
+    if (options.through && file.endsWith(options.through)) break;
   }
 
   // After all migrations are in place, grant the test_auth_user role

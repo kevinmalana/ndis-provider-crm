@@ -15,6 +15,17 @@ describe("Ticket 05b provider-readiness boundary", () => {
     expect(rows.rows.some((row) => (row as { proname: string }).proname === "cmd_admin_create_service_ready_shift")).toBe(true);
   });
 
+  it("proves the migration boundary: old callable through 0008c, absent after 0009", async () => {
+    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+    const before = await legacy.execAsService(`select pg_get_function_identity_arguments(oid) as args from pg_proc where pronamespace='public'::regnamespace and proname='cmd_admin_create_shift'`);
+    expect(before.rows).toHaveLength(1);
+    expect((before.rows[0] as { args: string }).args.replace(/\s+/g, " ")).toBe("p_command_id text, p_organisation_id uuid, p_participant_id uuid, p_worker_membership uuid, p_scheduled_start timestamp with time zone, p_scheduled_end timestamp with time zone, p_reason text, p_payload jsonb");
+    await legacy.raw.close();
+    const after = await ex.execAsService(`select count(*)::int as c from pg_proc where pronamespace='public'::regnamespace and proname='cmd_admin_create_shift'`);
+    expect(after.rows[0]).toMatchObject({ c: 0 });
+  });
+
+
   it("creates an immutable service snapshot and duplicate retry returns its receipt", async () => {
     ex.setUser(fx.schedulerUid);
     const worker = (await ex.execAsService(`select id from public.organisation_memberships where organisation_id='${fx.orgId}' and profile_id='${fx.workerAUid}'`)).rows[0] as { id: string };
