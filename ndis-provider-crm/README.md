@@ -195,7 +195,8 @@ and admin clients consume for fully typed queries.
 - **Components**: [shadcn/ui](https://ui.shadcn.com) — `radix-vega` preset, configured with the CLI (`pnpm dlx shadcn@latest add …`). Source lives in `src/components/ui/`. The shadcn alias variables (`--background`, `--primary`, …) are mapped onto our tokens in `globals.css`, so re-targeting a token re-skins every component.
 - **Icons**: `lucide-react`. Don't ship inline SVGs for first-class icons.
 - **Font**: Inter via `next/font` (variable, weights 400–700). No runtime Google Fonts requests.
-- **Dev reference**: `pnpm dev` → `http://localhost:3000/design-system` (dev-only — returns null in production). Shows every token visualised plus a sample of each installed shadcn component.
+- **Dev reference**: `pnpm dev` → `http://localhost:3000/design-system` (dev-only — production responds with a real 404). Shows resolved values for every token plus a sample of each installed UI component.
+- **Accessibility rails**: ordinary controls use the 24 CSS-px baseline; worker actions use 48 CSS px. `AccessibleStatus`, `FormError`, and `StickyActionLayout` provide reusable non-colour/non-audio status, error, and measured scroll-space sticky patterns; every layout must receive a definite container height. Tenant branding must pass `resolveValidatedTenantTheme` at a trusted server boundary before the validated CSS hook is emitted. Run `pnpm a11y` with a locally installed Chromium browser for representative axe and Pa11y checks.
 
 ### Adding a new shadcn component
 

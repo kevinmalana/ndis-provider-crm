@@ -8,6 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "a11y:axe": "node scripts/a11y/axe-check.mjs",
+    "a11y:pa11y": "node scripts/a11y/pa11y-check.mjs",
+    "a11y": "pnpm a11y:axe && pnpm a11y:pa11y",
     "db:parse": "node --import tsx scripts/parse-migrations.mjs",
     "db:test": "vitest run",
     "db:types": "supabase gen types typescript --linked > src/lib/supabase/types.gen.ts",
@@ -32,6 +35,7 @@
     "tw-animate-css": "^1.4.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
     "@electric-sql/pglite": "^0.5.4",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20",
@@ -40,6 +44,8 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "libpg-query": "^17.7.4",
+    "pa11y": "9.1.1",
+    "playwright": "1.62.1",
     "postcss": "^8.5.25",
     "supabase": "^2.111.0",
     "tailwindcss": "^4.3.3",

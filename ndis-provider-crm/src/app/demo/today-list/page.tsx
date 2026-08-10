@@ -192,7 +192,7 @@ export default function TodayListDemoPage() {
               type="button"
               onClick={handleCancelInTransit}
               className="flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-3 py-2 text-xs font-medium shrink-0"
-              style={{ minHeight: "var(--touch-min)" }}
+              style={{ minHeight: "var(--touch-worker-min)", minWidth: "var(--touch-worker-min)" }}
               aria-label="Cancel in-transit status"
             >
               <X aria-hidden className="size-3.5" />
@@ -249,7 +249,7 @@ export default function TodayListDemoPage() {
                     type="button"
                     onClick={() => handlePrimaryAction(shift)}
                     className="mt-3 w-full rounded-xl bg-primary text-primary-foreground py-3 text-sm font-semibold flex items-center justify-center gap-1.5 hover:bg-primary/90"
-                    style={{ minHeight: "var(--touch-min)" }}
+                    style={{ minHeight: "var(--touch-worker-min)", minWidth: "var(--touch-worker-min)" }}
                   >
                     {shiftCtaLabel(shift.status)}
                     <ChevronRight aria-hidden className="size-4" />
@@ -261,7 +261,7 @@ export default function TodayListDemoPage() {
         </ul>
 
         <footer className="px-5 py-3 border-t border-border bg-muted text-xs text-muted-foreground">
-          44 px tap targets throughout · WCAG 2.2 AA contrast · offline-aware
+          48 CSS-px worker actions · WCAG 2.2 AA contrast · offline-aware
         </footer>
       </div>
     </div>
