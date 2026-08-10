@@ -1,11 +1,33 @@
 "use client";
 
 import { cloneElement, isValidElement, useId, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+
+import {
+  PRIVACY_SAFE_RECIPIENT_FALLBACK,
+  acknowledge,
+  allWarningsAcknowledged,
+  beginCommand,
+  buildIdentityLabels,
+  completeCommand,
+  createCommand,
+  describeWarning,
+  failCommand,
+  initialReviewDueState,
+  isAcknowledged,
+  labelFor,
+  setCreateDue,
+  setUpdateDue,
+  type CommandRecord,
+  type IdentityRow,
+  type ReviewDueState,
+  type WarningAcknowledgement,
+} from "./workspace-state";
 
 type Organisation = { id: string; name: string; role: string };
 type Data = {
@@ -22,43 +44,154 @@ type Data = {
   audit: Array<Record<string, unknown>>;
 };
 
-const id = () => crypto.randomUUID();
 const isoTomorrow = () => new Date(Date.now() + 86400000).toISOString().slice(0, 16);
 
+const FORM_KEYS = {
+  createParticipant: "create-participant",
+  updateCriticalInfo: "update-critical-info",
+  createShift: "create-shift",
+  setAvailability: "set-availability",
+  reassignShift: "reassign-shift",
+  invite: "invite",
+  recordConsent: "record-consent",
+  renewConsent: "renew-consent",
+  createGrant: "create-grant",
+  revokeGrant: "revoke-grant",
+  linkSelf: "link-self",
+  setAuthority: "set-authority",
+} as const;
+
+type FormKey = typeof FORM_KEYS[keyof typeof FORM_KEYS];
+
+function freshFormKeys(): Record<FormKey, string> {
+  const keys = Object.values(FORM_KEYS) as FormKey[];
+  return Object.fromEntries(keys.map((k) => [k, crypto.randomUUID()])) as Record<FormKey, string>;
+}
+
 export function AdminWorkspace({ organisation, initialData }: { organisation: Organisation; initialData: Data }) {
+  // Data flows through props so router.refresh() re-renders the
+  // workspace with newly reconciled rows. Only client-specific state
+  // lives in useState so refresh preserves warnings and acks.
+  const data = initialData;
+  const router = useRouter();
+  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [tab, setTab] = useState("overview");
-  const [data] = useState(initialData);
   const [message, setMessage] = useState("");
-  const [warning, setWarning] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
-  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const workers = data.identities.filter((m) => m.role === "worker");
 
-  async function call(name: string, args: Record<string, unknown>) {
+  const [commandIds, setCommandIds] = useState<Record<FormKey, string>>(() => freshFormKeys());
+  const [records, setRecords] = useState<Record<FormKey, CommandRecord>>(() => {
+    const init: Partial<Record<FormKey, CommandRecord>> = {};
+    for (const key of Object.values(FORM_KEYS)) {
+      init[key] = createCommand({ commandId: crypto.randomUUID() });
+    }
+    return init as Record<FormKey, CommandRecord>;
+  });
+  const [acks, setAcks] = useState<WarningAcknowledgement[]>([]);
+
+  const workers = data.identities.filter((m) => m.role === "worker");
+  const identityLabels = useMemo(
+    () => buildIdentityLabels(data.identities as unknown as IdentityRow[]),
+    [data.identities],
+  );
+
+  function currentCommandId(formKey: FormKey): string {
+    return commandIds[formKey];
+  }
+
+  function renewCommandId(formKey: FormKey): string {
+    const nextId = crypto.randomUUID();
+    setCommandIds((prev) => ({ ...prev, [formKey]: nextId }));
+    setRecords((prev) => ({ ...prev, [formKey]: createCommand({ commandId: nextId }) }));
+    return nextId;
+  }
+
+  function transitionRecord(formKey: FormKey, updater: (rec: CommandRecord) => CommandRecord): void {
+    setRecords((prev) => ({ ...prev, [formKey]: updater(prev[formKey]) }));
+  }
+
+  async function call(formKey: FormKey, name: string, args: Record<string, unknown>): Promise<boolean> {
     if (pendingRef.current) return false;
     pendingRef.current = true;
     setPending(true);
-    setWarning([]);
     setMessage("Saving securely…");
+    transitionRecord(formKey, beginCommand);
+    const commandId = currentCommandId(formKey);
     try {
-      const { data: result, error } = await supabase.rpc(name, args);
-      if (error) { setMessage(`Could not save: ${error.message.replace(/^.*?: /, "")}`); return false; }
-      const payload = (result ?? {}) as { token?: string; warnings?: string[]; status?: string };
+      const { data: result, error } = await supabase.rpc(name, { ...args, p_command_id: commandId });
+      if (error) {
+        setMessage(`Could not save: ${error.message.replace(/^.*?: /, "")}`);
+        transitionRecord(formKey, failCommand);
+        return false;
+      }
+      const payload = (result ?? {}) as {
+        token?: string;
+        warnings?: string[];
+        status?: "accepted" | "duplicate_returned";
+        shift_id?: string;
+        consent_id?: string;
+        grant_id?: string;
+        [k: string]: unknown;
+      };
+      const status = payload.status;
+      const isDuplicate = status === "duplicate_returned";
+
       if (name === "cmd_admin_invite" && payload.token) {
         const url = `${window.location.origin}/invite/${payload.token}`;
-        try { await navigator.clipboard.writeText(url); setMessage("Invitation created. The single-use link was copied; share it through the provider’s approved channel."); }
-        catch { setMessage(`Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`); }
-      } else if (payload.warnings?.length) {
-        setWarning(payload.warnings);
-        setMessage("Shift created, but review the roster warnings before treating it as confirmed.");
-      } else setMessage(payload.status === "duplicate_returned" ? "This command was already applied; the original result was returned." : "Saved and added to the audit timeline.");
+        try {
+          await navigator.clipboard.writeText(url);
+          setMessage("Invitation created. The single-use link was copied; share it through the provider’s approved channel.");
+        } catch {
+          setMessage(`Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`);
+        }
+        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey: null, warnings: [] }));
+        renewCommandId(formKey);
+        void router.refresh();
+      } else if (name === "cmd_admin_create_shift" && Array.isArray(payload.warnings) && payload.warnings.length > 0 && typeof payload.shift_id === "string") {
+        const resultKey = payload.shift_id;
+        const warningKeys = payload.warnings;
+        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey, warnings: warningKeys }));
+        setMessage(
+          isDuplicate
+            ? "This command was already applied; the original shift result with warnings is shown."
+            : "Shift created, but review the roster warnings before treating it as confirmed.",
+        );
+        // Keep the command ID stable until warnings are acknowledged so a
+        // transport-uncertain retry returns the same shift result.
+        void router.refresh();
+      } else {
+        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey: null, warnings: [] }));
+        setMessage(
+          isDuplicate
+            ? "This command was already applied; the original result was returned."
+            : "Saved and added to the audit timeline.",
+        );
+        renewCommandId(formKey);
+        void router.refresh();
+      }
       return true;
     } catch (error) {
       setMessage(`Could not save: ${error instanceof Error ? error.message : "connection failed"}`);
+      transitionRecord(formKey, failCommand);
       return false;
-    } finally { pendingRef.current = false; setPending(false); }
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
   }
+
+  function acknowledgeWarning(resultKey: string, warningKey: string, acknowledged: boolean): void {
+    if (acknowledged) {
+      setAcks((prev) => acknowledge(prev, resultKey, [warningKey], new Date().toISOString()));
+    } else {
+      setAcks((prev) => prev.filter((ack) => !(ack.resultKey === resultKey && ack.warningKey === warningKey)));
+    }
+  }
+
+  const pendingWarnings = Object.values(records)
+    .filter((rec) => rec.resultKey && rec.warnings.length > 0)
+    .map((rec) => ({ resultKey: rec.resultKey as string, warnings: rec.warnings }));
 
   return (
     <div className="space-y-6">
@@ -74,12 +207,71 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
         {["overview", "participants", "roster", "access", "audit"].map((item) => <Button key={item} variant={tab === item ? "default" : "outline"} onClick={() => setTab(item)} aria-current={tab === item ? "page" : undefined}>{item[0].toUpperCase() + item.slice(1)}</Button>)}
       </nav>
       {message ? <p role="status" className="rounded-md border border-info/40 bg-info/10 px-3 py-2 text-sm">{message}</p> : null}
-      {warning.length ? <div role="alert" className="rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-sm"><strong>Roster warnings require review.</strong><ul className="mt-1 list-disc pl-5">{warning.map((item) => <li key={item}>{item === "worker_overlap" ? "The worker has another overlapping assignment." : "The shift falls outside the worker’s published availability."}</li>)}</ul></div> : null}
+      {pendingWarnings.map(({ resultKey, warnings: warningKeys }) => {
+        const allAck = allWarningsAcknowledged(acks, resultKey, warningKeys);
+        return (
+          <div key={resultKey} role="alert" className="rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-sm">
+            <strong>Roster warnings require review.</strong>
+            <p className="text-xs text-muted-foreground">Tied to shift result <code>{resultKey.slice(0, 8)}…</code>; refreshes keep this alert bound to the same shift.</p>
+            <ul className="mt-1 list-disc pl-5">
+              {warningKeys.map((warningKey) => {
+                const description = describeWarning(warningKey);
+                const ack = isAcknowledged(acks, resultKey, warningKey);
+                const inputId = `ack-${resultKey}-${warningKey}`;
+                return (
+                  <li key={warningKey}>
+                    <label className="flex items-start gap-2" htmlFor={inputId}>
+                      <input
+                        id={inputId}
+                        type="checkbox"
+                        checked={ack}
+                        onChange={(e) => acknowledgeWarning(resultKey, warningKey, e.target.checked)}
+                        className="mt-1"
+                      />
+                      <span>{description.message}</span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="mt-1 text-xs">
+              {allAck
+                ? "All warnings acknowledged for this shift result."
+                : `${warningKeys.filter((k) => isAcknowledged(acks, resultKey, k)).length}/${warningKeys.length} acknowledged.`}
+            </p>
+          </div>
+        );
+      })}
 
       {tab === "overview" ? <Overview data={data} setTab={setTab} /> : null}
-      {tab === "participants" ? <Participants data={data} organisationId={organisation.id} call={call} pending={pending} /> : null}
-      {tab === "roster" ? <Roster data={data} workers={workers} organisationId={organisation.id} call={call} pending={pending} /> : null}
-      {tab === "access" ? <Access data={data} organisationId={organisation.id} actorRole={organisation.role} call={call} pending={pending} /> : null}
+      {tab === "participants" ? (
+        <Participants
+          data={data}
+          organisationId={organisation.id}
+          call={call}
+          pending={pending}
+        />
+      ) : null}
+      {tab === "roster" ? (
+        <Roster
+          data={data}
+          workers={workers}
+          organisationId={organisation.id}
+          call={call}
+          pending={pending}
+        />
+      ) : null}
+      {tab === "access" ? (
+        <Access
+          data={data}
+          organisationId={organisation.id}
+          actorRole={organisation.role}
+          call={call}
+          pending={pending}
+          privacyFallback={PRIVACY_SAFE_RECIPIENT_FALLBACK}
+          labelLookup={(profileId) => labelFor(identityLabels, profileId)}
+        />
+      ) : null}
       {tab === "audit" ? <Audit data={data} /> : null}
     </div>
   );
@@ -90,46 +282,673 @@ function Overview({ data, setTab }: { data: Data; setTab: (tab: string) => void 
   return <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{cards.map((card) => <button key={card.label} className="text-left" onClick={() => setTab(card.tab)}><Card className="h-full transition hover:ring-2 hover:ring-ring"><CardHeader><CardDescription>{card.label}</CardDescription><CardTitle className="text-3xl">{card.value}</CardTitle></CardHeader><CardContent><span className="text-sm text-muted-foreground">Open workspace →</span></CardContent></Card></button>)}</div>;
 }
 
-function Participants({ data, organisationId, call, pending }: { data: Data; organisationId: string; call: (name: string, args: Record<string, unknown>) => Promise<boolean>; pending?: boolean }) {
-  const [firstName, setFirstName] = useState(""); const [lastInitial, setLastInitial] = useState(""); const [critical, setCritical] = useState(""); const [due, setDue] = useState(isoTomorrow()); const [criticalParticipant, setCriticalParticipant] = useState(""); const [updatedCritical, setUpdatedCritical] = useState("");
-  return <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-    <Card><CardHeader><CardTitle>Create participant</CardTitle><CardDescription>Identity and minimum critical handoff are created together, but remain separate records.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_create_participant", { p_command_id: id(), p_organisation_id: organisationId, p_first_name: firstName, p_last_initial: lastInitial, p_critical_content: critical, p_review_due_at: new Date(due).toISOString(), p_payload: { source: "admin-workspace" } }); }}>
-      <Field label="First name"><Input required value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Synthetic participant" /></Field>
-      <Field label="Last initial"><Input maxLength={3} value={lastInitial} onChange={(e) => setLastInitial(e.target.value)} placeholder="R" /></Field>
-      <Field label="Critical support and safety handoff"><textarea required value={critical} onChange={(e) => setCritical(e.target.value)} className="min-h-28 w-full rounded-md border bg-transparent p-3 text-base" placeholder="Minimum worker-visible information; no clinical approval claim." /></Field>
-      <Field label="Review due"><Input required type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} /></Field>
-      <Button type="submit" disabled={pending}>Create secure record</Button>
-    </form></CardContent></Card>
-    <Card><CardHeader><CardTitle>Participant register</CardTitle><CardDescription>Names are intentionally minimised. Open a participant to review separate authority and sharing evidence.</CardDescription></CardHeader><CardContent><div className="space-y-3">{data.participants.length ? data.participants.map((p) => { const card = data.cards.find((c) => c.participant_id === p.id); return <div key={String(p.id)} className="rounded-lg border p-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(p.first_name)} {p.last_initial ? `${String(p.last_initial)}.` : ""}</strong><span className="text-xs text-muted-foreground">Created {new Date(String(p.created_at)).toLocaleDateString("en-AU")}</span></div><p className="mt-2 text-sm text-muted-foreground">Critical handoff: {card ? `review due ${new Date(String(card.review_due_at)).toLocaleDateString("en-AU")}` : "missing — contact provider"}</p></div>; }) : <EmptyState text="No participants yet. Use the form to prepare a synthetic participant." />}</div><form className="mt-5 space-y-4 border-t pt-5" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_update_critical_info", { p_command_id: id(), p_organisation_id: organisationId, p_participant_id: criticalParticipant, p_critical_content: updatedCritical, p_review_due_at: new Date(due).toISOString(), p_payload: { source: "admin-workspace" } }); }}><Field label="Participant to review"><select required value={criticalParticipant} onChange={(e) => setCriticalParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose participant</option>{data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}</select></Field><Field label="Updated critical handoff"><textarea required value={updatedCritical} onChange={(e) => setUpdatedCritical(e.target.value)} className="min-h-24 w-full rounded-md border bg-transparent p-3 text-base" /></Field><Button type="submit" disabled={pending} variant="outline">Publish reviewed handoff</Button></form></CardContent></Card>
-  </div>;
+function Participants({
+  data,
+  organisationId,
+  call,
+  pending,
+}: {
+  data: Data;
+  organisationId: string;
+  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
+  pending?: boolean;
+}) {
+  const [firstName, setFirstName] = useState("");
+  const [lastInitial, setLastInitial] = useState("");
+  const [critical, setCritical] = useState("");
+  const [dueState, setDueState] = useState<ReviewDueState>(() => initialReviewDueState(isoTomorrow()));
+  const [criticalParticipant, setCriticalParticipant] = useState("");
+  const [updatedCritical, setUpdatedCritical] = useState("");
+  return (
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+      <Card>
+        <CardHeader>
+          <CardTitle>Create participant</CardTitle>
+          <CardDescription>Identity and minimum critical handoff are created together, but remain separate records.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.createParticipant, "cmd_admin_create_participant", {
+                p_organisation_id: organisationId,
+                p_first_name: firstName,
+                p_last_initial: lastInitial,
+                p_critical_content: critical,
+                p_review_due_at: new Date(dueState.createDue).toISOString(),
+                p_payload: { source: "admin-workspace" },
+              });
+              setFirstName("");
+              setLastInitial("");
+              setCritical("");
+            }}
+          >
+            <Field label="First name">
+              <Input required value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Synthetic participant" />
+            </Field>
+            <Field label="Last initial">
+              <Input maxLength={3} value={lastInitial} onChange={(e) => setLastInitial(e.target.value)} placeholder="R" />
+            </Field>
+            <Field label="Critical support and safety handoff">
+              <textarea
+                required
+                value={critical}
+                onChange={(e) => setCritical(e.target.value)}
+                className="min-h-28 w-full rounded-md border bg-transparent p-3 text-base"
+                placeholder="Minimum worker-visible information; no clinical approval claim."
+              />
+            </Field>
+            <Field label="Review due (create)">
+              <Input
+                required
+                type="datetime-local"
+                value={dueState.createDue}
+                onChange={(e) => setDueState((prev) => setCreateDue(prev, e.target.value))}
+              />
+            </Field>
+            <Button type="submit" disabled={pending}>Create secure record</Button>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Participant register</CardTitle>
+          <CardDescription>Names are intentionally minimised. Open a participant to review separate authority and sharing evidence.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {data.participants.length
+              ? data.participants.map((p) => {
+                  const card = data.cards.find((c) => c.participant_id === p.id);
+                  return (
+                    <div key={String(p.id)} className="rounded-lg border p-4">
+                      <div className="flex flex-wrap justify-between gap-2">
+                        <strong>{String(p.first_name)} {p.last_initial ? `${String(p.last_initial)}.` : ""}</strong>
+                        <span className="text-xs text-muted-foreground">Created {new Date(String(p.created_at)).toLocaleDateString("en-AU")}</span>
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">Critical handoff: {card ? `review due ${new Date(String(card.review_due_at)).toLocaleDateString("en-AU")}` : "missing — contact provider"}</p>
+                    </div>
+                  );
+                })
+              : <EmptyState text="No participants yet. Use the form to prepare a synthetic participant." />}
+          </div>
+          <form
+            className="mt-5 space-y-4 border-t pt-5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.updateCriticalInfo, "cmd_admin_update_critical_info", {
+                p_organisation_id: organisationId,
+                p_participant_id: criticalParticipant,
+                p_critical_content: updatedCritical,
+                p_review_due_at: new Date(dueState.updateDue).toISOString(),
+                p_payload: { source: "admin-workspace" },
+              });
+              setUpdatedCritical("");
+            }}
+          >
+            <Field label="Participant to review">
+              <select required value={criticalParticipant} onChange={(e) => setCriticalParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}
+              </select>
+            </Field>
+            <Field label="Updated critical handoff">
+              <textarea
+                required
+                value={updatedCritical}
+                onChange={(e) => setUpdatedCritical(e.target.value)}
+                className="min-h-24 w-full rounded-md border bg-transparent p-3 text-base"
+              />
+            </Field>
+            <Field label="Review due (update)">
+              <Input
+                required
+                type="datetime-local"
+                value={dueState.updateDue}
+                onChange={(e) => setDueState((prev) => setUpdateDue(prev, e.target.value))}
+              />
+            </Field>
+            <Button type="submit" disabled={pending}>Update critical handoff</Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
-function Roster({ data, workers, organisationId, call, pending }: { data: Data; workers: Array<Record<string, unknown>>; organisationId: string; call: (name: string, args: Record<string, unknown>) => Promise<boolean>; pending?: boolean }) {
-  const [participant, setParticipant] = useState(""); const [worker, setWorker] = useState(""); const [start, setStart] = useState(""); const [end, setEnd] = useState(""); const [reason, setReason] = useState(""); const [availabilityFrom, setAvailabilityFrom] = useState(""); const [availabilityUntil, setAvailabilityUntil] = useState(""); const [availabilityNote, setAvailabilityNote] = useState(""); const [reassignShift, setReassignShift] = useState(""); const [reassignWorker, setReassignWorker] = useState(""); const [reassignReason, setReassignReason] = useState("");
-  return <div className="space-y-6"><Card><CardHeader><CardTitle>Create roster shift</CardTitle><CardDescription>Overlap and published-availability warnings return with the transaction; a warning does not silently hide the assignment.</CardDescription></CardHeader><CardContent><form className="grid gap-4 md:grid-cols-2" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_create_shift", { p_command_id: id(), p_organisation_id: organisationId, p_participant_id: participant, p_worker_membership: worker, p_scheduled_start: new Date(start).toISOString(), p_scheduled_end: new Date(end).toISOString(), p_reason: reason, p_payload: { source: "admin-workspace" } }); }}>
-    <Field label="Participant"><select required value={participant} onChange={(e) => setParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose participant</option>{data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)} {String(p.last_initial ?? "")}</option>)}</select></Field>
-    <Field label="Worker"><select required value={worker} onChange={(e) => setWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose worker membership</option>{workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)} · worker</option>)}</select></Field>
-    <Field label="Scheduled start"><Input required type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></Field><Field label="Scheduled end"><Input required type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
-    <Field label="Assignment reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Routine roster / cover" /></Field><div className="flex items-end"><Button type="submit" disabled={pending}>Create shift</Button></div>
-  </form></CardContent></Card>
-  <Card><CardHeader><CardTitle>Published worker availability</CardTitle><CardDescription>Availability is advisory. A shift outside this window is warned, not silently discarded.</CardDescription></CardHeader><CardContent><form className="grid gap-4 md:grid-cols-2" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_set_availability", { p_command_id: id(), p_organisation_id: organisationId, p_worker_membership: worker, p_available_from: new Date(availabilityFrom).toISOString(), p_available_until: new Date(availabilityUntil).toISOString(), p_note: availabilityNote, p_payload: { source: "admin-workspace" } }); }}><Field label="Worker"><select required value={worker} onChange={(e) => setWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose worker membership</option>{workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)}</option>)}</select></Field><Field label="Note"><Input value={availabilityNote} onChange={(e) => setAvailabilityNote(e.target.value)} placeholder="School hours / regular window" /></Field><Field label="Available from"><Input required type="datetime-local" value={availabilityFrom} onChange={(e) => setAvailabilityFrom(e.target.value)} /></Field><Field label="Available until"><Input required type="datetime-local" value={availabilityUntil} onChange={(e) => setAvailabilityUntil(e.target.value)} /></Field><div><Button type="submit" disabled={pending} variant="outline">Publish availability</Button></div></form></CardContent></Card>
-  <Card><CardHeader><CardTitle>Reassign a shift</CardTitle><CardDescription>The current assignment is withdrawn, the new assignment is appended, and the reason remains visible in the audit history.</CardDescription></CardHeader><CardContent><form className="grid gap-4 md:grid-cols-2" onSubmit={(e) => { e.preventDefault(); const selected = data.shifts.find((s) => s.id === reassignShift); if (!selected) return; void call("cmd_reassign_shift", { p_command_id: id(), p_shift_id: reassignShift, p_expected_version: selected.version, p_claimed_at: new Date().toISOString(), p_client_tz: "Australia/Sydney", p_new_worker_membership: reassignWorker, p_reason: reassignReason, p_payload: { source: "admin-workspace" } }); }}><Field label="Shift"><select required value={reassignShift} onChange={(e) => setReassignShift(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose shift</option>{data.shifts.map((s) => <option key={String(s.id)} value={String(s.id)}>{new Date(String(s.scheduled_start)).toLocaleString("en-AU")} · v{String(s.version)}</option>)}</select></Field><Field label="New worker"><select required value={reassignWorker} onChange={(e) => setReassignWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose worker membership</option>{workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)}</option>)}</select></Field><Field label="Reason"><Input required value={reassignReason} onChange={(e) => setReassignReason(e.target.value)} placeholder="Cover confirmed with worker" /></Field><div className="flex items-end"><Button type="submit" variant="outline">Reassign shift</Button></div></form></CardContent></Card>
-  <Card><CardHeader><CardTitle>Roster and audit-friendly assignment history</CardTitle><CardDescription>Reassignment uses the existing versioned command and never erases prior assignments.</CardDescription></CardHeader><CardContent><div className="space-y-3">{data.shifts.length ? data.shifts.map((shift) => { const assignment = data.assignments.find((a) => a.shift_id === shift.id && !a.withdrawn_at); const p = data.participants.find((item) => item.id === shift.participant_id); return <div key={String(shift.id)} className="rounded-lg border p-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(p?.first_name ?? "Participant")}</strong><span className="rounded-full bg-muted px-2 py-1 text-xs">{String(shift.state)}</span></div><p className="mt-1 text-sm">{new Date(String(shift.scheduled_start)).toLocaleString("en-AU")} – {new Date(String(shift.scheduled_end)).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" })}</p><p className="text-xs text-muted-foreground">Current worker membership: {String(assignment?.membership_id ?? "unassigned")} · version {String(shift.version)}</p></div>; }) : <EmptyState text="No shifts yet. Create a synthetic roster assignment above." />}</div></CardContent></Card></div>;
+function Roster({
+  data,
+  workers,
+  organisationId,
+  call,
+  pending,
+}: {
+  data: Data;
+  workers: Array<Record<string, unknown>>;
+  organisationId: string;
+  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
+  pending?: boolean;
+}) {
+  const [participant, setParticipant] = useState("");
+  const [worker, setWorker] = useState("");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [reason, setReason] = useState("");
+  const [availabilityFrom, setAvailabilityFrom] = useState("");
+  const [availabilityUntil, setAvailabilityUntil] = useState("");
+  const [availabilityNote, setAvailabilityNote] = useState("");
+  const [reassignShift, setReassignShift] = useState("");
+  const [reassignWorker, setReassignWorker] = useState("");
+  const [reassignReason, setReassignReason] = useState("");
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Create roster shift</CardTitle>
+          <CardDescription>Overlap and published-availability warnings return with the transaction; a warning does not silently hide the assignment.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="grid gap-4 md:grid-cols-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.createShift, "cmd_admin_create_shift", {
+                p_organisation_id: organisationId,
+                p_participant_id: participant,
+                p_worker_membership: worker,
+                p_scheduled_start: new Date(start).toISOString(),
+                p_scheduled_end: new Date(end).toISOString(),
+                p_reason: reason,
+                p_payload: { source: "admin-workspace" },
+              });
+              setReason("");
+            }}
+          >
+            <Field label="Participant">
+              <select required value={participant} onChange={(e) => setParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)} {String(p.last_initial ?? "")}</option>)}
+              </select>
+            </Field>
+            <Field label="Worker">
+              <select required value={worker} onChange={(e) => setWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose worker membership</option>
+                {workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)} · worker</option>)}
+              </select>
+            </Field>
+            <Field label="Scheduled start">
+              <Input required type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+            </Field>
+            <Field label="Scheduled end">
+              <Input required type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
+            </Field>
+            <Field label="Assignment reason">
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Routine roster / cover" />
+            </Field>
+            <div className="flex items-end">
+              <Button type="submit" disabled={pending}>Create shift</Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Published worker availability</CardTitle>
+          <CardDescription>Availability is advisory. A shift outside this window is warned, not silently discarded.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="grid gap-4 md:grid-cols-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.setAvailability, "cmd_admin_set_availability", {
+                p_organisation_id: organisationId,
+                p_worker_membership: worker,
+                p_available_from: new Date(availabilityFrom).toISOString(),
+                p_available_until: new Date(availabilityUntil).toISOString(),
+                p_note: availabilityNote,
+                p_payload: { source: "admin-workspace" },
+              });
+              setAvailabilityNote("");
+            }}
+          >
+            <Field label="Worker">
+              <select required value={worker} onChange={(e) => setWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose worker membership</option>
+                {workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)}</option>)}
+              </select>
+            </Field>
+            <Field label="Note">
+              <Input value={availabilityNote} onChange={(e) => setAvailabilityNote(e.target.value)} placeholder="School hours / regular window" />
+            </Field>
+            <Field label="Available from">
+              <Input required type="datetime-local" value={availabilityFrom} onChange={(e) => setAvailabilityFrom(e.target.value)} />
+            </Field>
+            <Field label="Available until">
+              <Input required type="datetime-local" value={availabilityUntil} onChange={(e) => setAvailabilityUntil(e.target.value)} />
+            </Field>
+            <div>
+              <Button type="submit" disabled={pending} variant="outline">Publish availability</Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Reassign a shift</CardTitle>
+          <CardDescription>The current assignment is withdrawn, the new assignment is appended, and the reason remains visible in the audit history.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="grid gap-4 md:grid-cols-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const selected = data.shifts.find((s) => s.id === reassignShift);
+              if (!selected) return;
+              void call(FORM_KEYS.reassignShift, "cmd_reassign_shift", {
+                p_shift_id: reassignShift,
+                p_expected_version: selected.version,
+                p_claimed_at: new Date().toISOString(),
+                p_client_tz: "Australia/Sydney",
+                p_new_worker_membership: reassignWorker,
+                p_reason: reassignReason,
+                p_payload: { source: "admin-workspace" },
+              });
+              setReassignReason("");
+            }}
+          >
+            <Field label="Shift">
+              <select required value={reassignShift} onChange={(e) => setReassignShift(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose shift</option>
+                {data.shifts.map((s) => <option key={String(s.id)} value={String(s.id)}>{new Date(String(s.scheduled_start)).toLocaleString("en-AU")} · v{String(s.version)}</option>)}
+              </select>
+            </Field>
+            <Field label="New worker">
+              <select required value={reassignWorker} onChange={(e) => setReassignWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose worker membership</option>
+                {workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)}</option>)}
+              </select>
+            </Field>
+            <Field label="Reason">
+              <Input required value={reassignReason} onChange={(e) => setReassignReason(e.target.value)} placeholder="Cover confirmed with worker" />
+            </Field>
+            <div className="flex items-end">
+              <Button type="submit" variant="outline">Reassign shift</Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Roster and audit-friendly assignment history</CardTitle>
+          <CardDescription>Reassignment uses the existing versioned command and never erases prior assignments.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {data.shifts.length
+              ? data.shifts.map((shift) => {
+                  const assignment = data.assignments.find((a) => a.shift_id === shift.id && !a.withdrawn_at);
+                  const p = data.participants.find((item) => item.id === shift.participant_id);
+                  return (
+                    <div key={String(shift.id)} className="rounded-lg border p-4">
+                      <div className="flex flex-wrap justify-between gap-2">
+                        <strong>{String(p?.first_name ?? "Participant")}</strong>
+                        <span className="rounded-full bg-muted px-2 py-1 text-xs">{String(shift.state)}</span>
+                      </div>
+                      <p className="mt-1 text-sm">{new Date(String(shift.scheduled_start)).toLocaleString("en-AU")} – {new Date(String(shift.scheduled_end)).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" })}</p>
+                      <p className="text-xs text-muted-foreground">Current worker membership: {String(assignment?.membership_id ?? "unassigned")} · version {String(shift.version)}</p>
+                    </div>
+                  );
+                })
+              : <EmptyState text="No shifts yet. Create a synthetic roster assignment above." />}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
-function Access({ data, organisationId, actorRole, call, pending }: { data: Data; organisationId: string; actorRole: string; call: (name: string, args: Record<string, unknown>) => Promise<boolean>; pending?: boolean }) {
-  const [email, setEmail] = useState(""); const [role, setRole] = useState("worker"); const [inviteExpiry, setInviteExpiry] = useState(isoTomorrow()); const [evidence, setEvidence] = useState(""); const [authorityType, setAuthorityType] = useState("plan_nominee"); const [authorityScope, setAuthorityScope] = useState("upcoming_visits,service_summary"); const [selfEvidence, setSelfEvidence] = useState(""); const [grantConsent, setGrantConsent] = useState(""); const [consentBasis, setConsentBasis] = useState("participant"); const [consentParticipant, setConsentParticipant] = useState(""); const [consentRecipient, setConsentRecipient] = useState(""); const [consentAuthoriser, setConsentAuthoriser] = useState(""); const [consentAuthority, setConsentAuthority] = useState(""); const [consentPurpose, setConsentPurpose] = useState(""); const [consentScope, setConsentScope] = useState("service_summary"); const [consentEvidence, setConsentEvidence] = useState(""); const [selfParticipant, setSelfParticipant] = useState(""); const [selfProfile, setSelfProfile] = useState(""); const [authorityParticipant, setAuthorityParticipant] = useState(""); const [authorityProfile, setAuthorityProfile] = useState("");
+function Access({
+  data,
+  organisationId,
+  actorRole,
+  call,
+  pending,
+  privacyFallback,
+  labelLookup,
+}: {
+  data: Data;
+  organisationId: string;
+  actorRole: string;
+  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
+  pending?: boolean;
+  privacyFallback: string;
+  labelLookup: (profileId: string) => { hasLabel: true; label: string; role: string } | { hasLabel: false; label: string; role: null };
+}) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("worker");
+  const [inviteExpiry, setInviteExpiry] = useState(isoTomorrow());
+  const [evidence, setEvidence] = useState("");
+  const [authorityType, setAuthorityType] = useState("plan_nominee");
+  const [authorityScope, setAuthorityScope] = useState("upcoming_visits,service_summary");
+  const [selfEvidence, setSelfEvidence] = useState("");
+  const [grantConsent, setGrantConsent] = useState("");
+  const [consentBasis, setConsentBasis] = useState("participant");
+  const [consentParticipant, setConsentParticipant] = useState("");
+  const [consentRecipient, setConsentRecipient] = useState("");
+  const [consentAuthoriser, setConsentAuthoriser] = useState("");
+  const [consentAuthority, setConsentAuthority] = useState("");
+  const [consentPurpose, setConsentPurpose] = useState("");
+  const [consentScope, setConsentScope] = useState("service_summary");
+  const [consentEvidence, setConsentEvidence] = useState("");
+  const [selfParticipant, setSelfParticipant] = useState("");
+  const [selfProfile, setSelfProfile] = useState("");
+  const [authorityParticipant, setAuthorityParticipant] = useState("");
+  const [authorityProfile, setAuthorityProfile] = useState("");
   const inviteRoles = actorRole === "admin" ? ["admin", "scheduler", "worker", "participant", "nominee", "external"] : ["worker", "participant", "nominee"];
-  return <div className="grid gap-6 lg:grid-cols-2"><Card><CardHeader><CardTitle>Invite a role</CardTitle><CardDescription>Invitations are single-use, expiring, and do not reveal whether the email belongs to another organisation.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_invite", { p_command_id: id(), p_organisation_id: organisationId, p_email: email, p_role: role, p_expires_at: new Date(inviteExpiry).toISOString(), p_payload: { source: "admin-workspace" } }); }}><Field label="Email"><Input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></Field><Field label="Role"><select value={role} onChange={(e) => setRole(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">{inviteRoles.map((inviteRole) => <option key={inviteRole}>{inviteRole}</option>)}</select></Field><Field label="Expires"><Input required type="datetime-local" value={inviteExpiry} onChange={(e) => setInviteExpiry(e.target.value)} /></Field><Button type="submit" disabled={pending}>Issue invitation</Button></form></CardContent></Card>
-  <Card><CardHeader><CardTitle>Record consent evidence</CardTitle><CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); const from = new Date(); const until = new Date(Date.now() + 30 * 86400000); void call("cmd_admin_record_consent", { p_command_id: id(), p_organisation_id: organisationId, p_participant_id: consentParticipant, p_recipient_profile_id: consentRecipient, p_authorising_profile_id: consentAuthoriser, p_purpose: consentPurpose, p_scope_categories: consentScope.split(",").map((s) => s.trim()).filter(Boolean), p_consent_basis: consentBasis, p_representative_authority_id: consentBasis === "authorised_representative" ? consentAuthority : null, p_evidence_reference: consentEvidence, p_effective_from: from.toISOString(), p_effective_until: until.toISOString(), p_payload: { source: "admin-workspace", provider_recorded: true } }); }}><Field label="Participant"><select required value={consentParticipant} onChange={(e) => setConsentParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose participant</option>{data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}</select></Field><Field label="External recipient"><select required value={consentRecipient} onChange={(e) => setConsentRecipient(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose external recipient</option>{data.identities.filter((i) => i.role === "external").map((i) => <option key={String(i.profile_id)} value={String(i.profile_id)}>{String(i.full_name ?? i.email ?? i.profile_id)}</option>)}</select></Field><Field label="Consent basis"><select value={consentBasis} onChange={(e) => setConsentBasis(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="participant">Participant</option><option value="authorised_representative">Authorised representative</option></select></Field><Field label="Authorising identity"><select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose authorising identity</option>{data.identities.filter((i) => i.role === (consentBasis === "participant" ? "participant" : "nominee")).map((i) => <option key={String(i.profile_id)} value={String(i.profile_id)}>{String(i.full_name ?? i.email ?? i.profile_id)}</option>)}</select></Field>{consentBasis === "authorised_representative" ? <Field label="Current authority"><select required value={consentAuthority} onChange={(e) => setConsentAuthority(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose current authority</option>{data.authorities.filter((a) => a.participant_id === consentParticipant && a.representative_profile_id === consentAuthoriser && a.status === "active").map((a) => <option key={String(a.id)} value={String(a.id)}>{String(a.authority_type)} · {String(a.evidence_reference)}</option>)}</select></Field> : null}<Field label="Purpose"><Input required value={consentPurpose} onChange={(e) => setConsentPurpose(e.target.value)} placeholder="Coordinate supports" /></Field><Field label="Record categories"><Input required value={consentScope} onChange={(e) => setConsentScope(e.target.value)} /></Field><Field label="Evidence reference"><Input required value={consentEvidence} onChange={(e) => setConsentEvidence(e.target.value)} placeholder="Provider-held evidence reference" /></Field><Button type="submit">Record provider-held consent</Button></form></CardContent></Card>
-  <Card><CardHeader><CardTitle>External view-only grant</CardTitle><CardDescription>Select an active consent record. The grant inherits its purpose, recipient, categories, basis, and evidence; only a bounded grant window is entered here.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); const selected = data.consents.find((c) => c.id === grantConsent); if (!selected) return; const from = new Date(); const until = new Date(Math.min(Date.now() + 30 * 86400000, new Date(String(selected.effective_until)).getTime())); void call("cmd_admin_create_grant", { p_command_id: id(), p_organisation_id: organisationId, p_consent_id: grantConsent, p_effective_from: from.toISOString(), p_effective_until: new Date(until).toISOString(), p_payload: { source: "admin-workspace" } }); }}><Field label="Consent evidence"><select required value={grantConsent} onChange={(e) => setGrantConsent(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose current consent evidence</option>{data.consents.filter((c) => c.status === "active").map((c) => <option key={String(c.id)} value={String(c.id)}>{String(c.purpose)} · {String(c.evidence_reference)} · {String(c.consent_basis)}</option>)}</select></Field><Button type="submit">Create view-only grant</Button></form></CardContent></Card>
-  <Card className="lg:col-span-2"><CardHeader><CardTitle>Current disclosures and authority</CardTitle><CardDescription>These are separate concepts. A representative authority never becomes an external grant automatically.</CardDescription></CardHeader><CardContent><div className="grid gap-3 md:grid-cols-2">{data.grants.map((grant) => <div key={String(grant.id)} className="rounded-lg border p-4"><div className="flex justify-between gap-2"><strong>{String(grant.purpose)}</strong><span className="text-xs">{String(grant.status)}</span></div><p className="text-sm text-muted-foreground">Scope: {Array.isArray(grant.scope_categories) ? (grant.scope_categories as string[]).join(", ") : String(grant.scope_categories)}</p><p className="text-xs text-muted-foreground">Recipient {String(grant.recipient_profile_id)} · expires {new Date(String(grant.effective_until)).toLocaleDateString("en-AU")}</p>{grant.status === "active" ? <Button className="mt-3" size="sm" variant="destructive" onClick={() => void call("cmd_admin_revoke_grant", { p_command_id: id(), p_organisation_id: organisationId, p_grant_id: grant.id, p_reason: "Withdrawn by authorised provider user", p_payload: { source: "admin-workspace" } })}>Revoke grant</Button> : null}</div>)}{!data.grants.length ? <EmptyState text="No external disclosure grants recorded." /> : null}</div></CardContent></Card>
-  <Card><CardHeader><CardTitle>Participant self-link</CardTitle><CardDescription>Self-access is separate from external disclosure and representative authority.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void call("cmd_admin_link_participant", { p_command_id: id(), p_organisation_id: organisationId, p_participant_id: selfParticipant, p_profile_id: selfProfile, p_evidence_reference: selfEvidence, p_payload: { source: "admin-workspace" } }); }}><Field label="Participant"><select required value={selfParticipant} onChange={(e) => setSelfParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose participant</option>{data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}</select></Field><Field label="Participant account"><select required value={selfProfile} onChange={(e) => setSelfProfile(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose invited participant</option>{data.identities.filter((i) => i.role === "participant").map((i) => <option key={String(i.profile_id)} value={String(i.profile_id)}>{String(i.full_name ?? i.email ?? i.profile_id)}</option>)}</select></Field><Field label="Evidence reference"><Input required value={selfEvidence} onChange={(e) => setSelfEvidence(e.target.value)} /></Field><Button type="submit" variant="outline">Link self-access</Button></form></CardContent></Card>
-  <Card><CardHeader><CardTitle>Representative authority</CardTitle><CardDescription>Record relationship, scope, evidence, issuer, and effective period independently.</CardDescription></CardHeader><CardContent><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); const from = new Date(); const until = new Date(Date.now() + 90 * 86400000); void call("cmd_admin_set_authority", { p_command_id: id(), p_organisation_id: organisationId, p_participant_id: authorityParticipant, p_representative_profile_id: authorityProfile, p_authority_type: authorityType, p_scope_categories: authorityScope.split(",").map((s) => s.trim()).filter(Boolean), p_evidence_reference: evidence, p_issuer: "Provider admin", p_effective_from: from.toISOString(), p_effective_until: until.toISOString(), p_payload: { source: "admin-workspace" } }); }}><Field label="Participant"><select required value={authorityParticipant} onChange={(e) => setAuthorityParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose participant</option>{data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}</select></Field><Field label="Representative account"><select required value={authorityProfile} onChange={(e) => setAuthorityProfile(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2"><option value="">Choose invited representative</option>{data.identities.filter((i) => i.role === "nominee").map((i) => <option key={String(i.profile_id)} value={String(i.profile_id)}>{String(i.full_name ?? i.email ?? i.profile_id)}</option>)}</select></Field><Field label="Authority type"><Input required value={authorityType} onChange={(e) => setAuthorityType(e.target.value)} /></Field><Field label="Scope categories"><Input required value={authorityScope} onChange={(e) => setAuthorityScope(e.target.value)} /></Field><Field label="Evidence reference"><Input required value={evidence} onChange={(e) => setEvidence(e.target.value)} /></Field><Button type="submit" variant="outline">Record authority</Button></form></CardContent></Card>
-  </div>;
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle>Invite a role</CardTitle>
+          <CardDescription>Invitations are single-use, expiring, and do not reveal whether the email belongs to another organisation.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.invite, "cmd_admin_invite", {
+                p_organisation_id: organisationId,
+                p_email: email,
+                p_role: role,
+                p_expires_at: new Date(inviteExpiry).toISOString(),
+                p_payload: { source: "admin-workspace" },
+              });
+              setEmail("");
+            }}
+          >
+            <Field label="Email"><Input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
+            <Field label="Role">
+              <select value={role} onChange={(e) => setRole(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                {inviteRoles.map((inviteRole) => <option key={inviteRole}>{inviteRole}</option>)}
+              </select>
+            </Field>
+            <Field label="Expires"><Input required type="datetime-local" value={inviteExpiry} onChange={(e) => setInviteExpiry(e.target.value)} /></Field>
+            <Button type="submit" disabled={pending}>Issue invitation</Button>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Record consent evidence</CardTitle>
+          <CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const from = new Date();
+              const until = new Date(Date.now() + 30 * 86400000);
+              void call(FORM_KEYS.recordConsent, "cmd_admin_record_consent", {
+                p_organisation_id: organisationId,
+                p_participant_id: consentParticipant,
+                p_recipient_profile_id: consentRecipient,
+                p_authorising_profile_id: consentAuthoriser,
+                p_purpose: consentPurpose,
+                p_scope_categories: consentScope.split(",").map((s) => s.trim()).filter(Boolean),
+                p_consent_basis: consentBasis,
+                p_representative_authority_id: consentBasis === "authorised_representative" ? consentAuthority : null,
+                p_evidence_reference: consentEvidence,
+                p_effective_from: from.toISOString(),
+                p_effective_until: until.toISOString(),
+                p_payload: { source: "admin-workspace", provider_recorded: true },
+              });
+              setConsentPurpose("");
+              setConsentEvidence("");
+            }}
+          >
+            <Field label="Participant">
+              <select required value={consentParticipant} onChange={(e) => setConsentParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}
+              </select>
+            </Field>
+            <Field label="External recipient">
+              <select required value={consentRecipient} onChange={(e) => setConsentRecipient(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose external recipient</option>
+                {data.identities.filter((i) => i.role === "external").map((i) => {
+                  const label = labelLookup(String(i.profile_id));
+                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label} · external</option>;
+                })}
+              </select>
+            </Field>
+            <Field label="Consent basis">
+              <select value={consentBasis} onChange={(e) => setConsentBasis(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="participant">Participant self</option>
+                <option value="authorised_representative">Authorised representative</option>
+              </select>
+            </Field>
+            {consentBasis === "authorised_representative" ? (
+              <Field label="Representative authority">
+                <select value={consentAuthority} onChange={(e) => setConsentAuthority(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                  <option value="">Choose representative authority</option>
+                  {data.authorities.filter((a) => a.status === "active").map((a) => <option key={String(a.id)} value={String(a.id)}>{String(a.authority_type)}</option>)}
+                </select>
+              </Field>
+            ) : (
+              <Field label="Participant authoriser">
+                <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                  <option value="">Choose participant account</option>
+                  {data.identities.filter((i) => i.role === "participant").map((i) => {
+                    const label = labelLookup(String(i.profile_id));
+                    return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
+                  })}
+                </select>
+              </Field>
+            )}
+            <Field label="Purpose"><Input required value={consentPurpose} onChange={(e) => setConsentPurpose(e.target.value)} placeholder="e.g. coordination with school" /></Field>
+            <Field label="Scope categories"><Input required value={consentScope} onChange={(e) => setConsentScope(e.target.value)} placeholder="service_summary,upcoming_visits" /></Field>
+            <Field label="Evidence reference"><Input required value={consentEvidence} onChange={(e) => setConsentEvidence(e.target.value)} placeholder="provider-recorded consent identifier" /></Field>
+            <Button type="submit" disabled={pending}>Record consent evidence</Button>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>External view-only grant</CardTitle>
+          <CardDescription>Select an active consent record. The grant inherits its purpose, recipient, categories, basis, and evidence; only a bounded grant window is entered here.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const selected = data.consents.find((c) => c.id === grantConsent);
+              if (!selected) return;
+              const from = new Date();
+              const until = new Date(Math.min(Date.now() + 30 * 86400000, new Date(String(selected.effective_until)).getTime()));
+              void call(FORM_KEYS.createGrant, "cmd_admin_create_grant", {
+                p_organisation_id: organisationId,
+                p_consent_id: grantConsent,
+                p_effective_from: from.toISOString(),
+                p_effective_until: new Date(until).toISOString(),
+                p_payload: { source: "admin-workspace" },
+              });
+            }}
+          >
+            <Field label="Consent evidence">
+              <select required value={grantConsent} onChange={(e) => setGrantConsent(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose current consent evidence</option>
+                {data.consents.filter((c) => c.status === "active").map((c) => {
+                  const label = labelLookup(String(c.recipient_profile_id));
+                  return (
+                    <option key={String(c.id)} value={String(c.id)}>
+                      {String(c.purpose)} · {label.label} · v{String(c.version ?? "1")}
+                    </option>
+                  );
+                })}
+              </select>
+            </Field>
+            <Button type="submit">Create view-only grant</Button>
+          </form>
+        </CardContent>
+      </Card>
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle>Current disclosures and authority</CardTitle>
+          <CardDescription>Recipient labels come from the scoped identity projection; raw recipient identifiers are never rendered here.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 md:grid-cols-2">
+            {data.grants.map((grant) => {
+              const recipient = labelLookup(String(grant.recipient_profile_id));
+              return (
+                <div key={String(grant.id)} className="rounded-lg border p-4">
+                  <div className="flex justify-between gap-2"><strong>{String(grant.purpose)}</strong><span className="text-xs">{String(grant.status)}</span></div>
+                  <p className="text-sm text-muted-foreground">Scope: {Array.isArray(grant.scope_categories) ? (grant.scope_categories as string[]).join(", ") : String(grant.scope_categories)}</p>
+                  <p className="text-xs text-muted-foreground">Recipient: <span data-testid="recipient-label">{recipient.label}</span>{recipient.role ? ` · ${recipient.role}` : recipient.hasLabel === false ? ` · ${privacyFallback}` : ""} · expires {new Date(String(grant.effective_until)).toLocaleDateString("en-AU")}</p>
+                  {grant.status === "active" ? (
+                    <Button
+                      className="mt-3"
+                      size="sm"
+                      variant="destructive"
+                      onClick={() =>
+                        void call(FORM_KEYS.revokeGrant, "cmd_admin_revoke_grant", {
+                          p_organisation_id: organisationId,
+                          p_grant_id: grant.id,
+                          p_reason: "Withdrawn by authorised provider user",
+                          p_payload: { source: "admin-workspace" },
+                        })
+                      }
+                    >
+                      Revoke grant
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
+            {!data.grants.length ? <EmptyState text="No external disclosure grants recorded." /> : null}
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Participant self-link</CardTitle>
+          <CardDescription>Self-access is separate from external disclosure and representative authority.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.linkSelf, "cmd_admin_link_participant", {
+                p_organisation_id: organisationId,
+                p_participant_id: selfParticipant,
+                p_profile_id: selfProfile,
+                p_evidence_reference: selfEvidence,
+                p_payload: { source: "admin-workspace" },
+              });
+              setSelfEvidence("");
+            }}
+          >
+            <Field label="Participant">
+              <select required value={selfParticipant} onChange={(e) => setSelfParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}
+              </select>
+            </Field>
+            <Field label="Participant account">
+              <select required value={selfProfile} onChange={(e) => setSelfProfile(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose invited participant</option>
+                {data.identities.filter((i) => i.role === "participant").map((i) => {
+                  const label = labelLookup(String(i.profile_id));
+                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
+                })}
+              </select>
+            </Field>
+            <Field label="Evidence reference"><Input required value={selfEvidence} onChange={(e) => setSelfEvidence(e.target.value)} /></Field>
+            <Button type="submit" variant="outline">Link self-access</Button>
+          </form>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Representative authority</CardTitle>
+          <CardDescription>Record relationship, scope, evidence, issuer, and effective period independently.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const from = new Date();
+              const until = new Date(Date.now() + 90 * 86400000);
+              void call(FORM_KEYS.setAuthority, "cmd_admin_set_authority", {
+                p_organisation_id: organisationId,
+                p_participant_id: authorityParticipant,
+                p_representative_profile_id: authorityProfile,
+                p_authority_type: authorityType,
+                p_scope_categories: authorityScope.split(",").map((s) => s.trim()).filter(Boolean),
+                p_evidence_reference: evidence,
+                p_issuer: "Provider admin",
+                p_effective_from: from.toISOString(),
+                p_effective_until: until.toISOString(),
+                p_payload: { source: "admin-workspace" },
+              });
+              setEvidence("");
+            }}
+          >
+            <Field label="Participant">
+              <select required value={authorityParticipant} onChange={(e) => setAuthorityParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}
+              </select>
+            </Field>
+            <Field label="Representative account">
+              <select required value={authorityProfile} onChange={(e) => setAuthorityProfile(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose invited representative</option>
+                {data.identities.filter((i) => i.role === "nominee").map((i) => {
+                  const label = labelLookup(String(i.profile_id));
+                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
+                })}
+              </select>
+            </Field>
+            <Field label="Authority type"><Input required value={authorityType} onChange={(e) => setAuthorityType(e.target.value)} /></Field>
+            <Field label="Scope categories"><Input required value={authorityScope} onChange={(e) => setAuthorityScope(e.target.value)} /></Field>
+            <Field label="Evidence reference"><Input required value={evidence} onChange={(e) => setEvidence(e.target.value)} /></Field>
+            <Button type="submit" variant="outline">Record representative authority</Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
-function Audit({ data }: { data: Data }) { return <Card><CardHeader><CardTitle>Audit timeline</CardTitle><CardDescription>Read-only visibility for invitations, roster changes, authority, grants, and participant records.</CardDescription></CardHeader><CardContent><ol className="space-y-3">{data.audit.length ? data.audit.map((entry) => <li key={String(entry.id)} className="border-l-2 border-primary/30 pl-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(entry.action)}</strong><time className="text-xs text-muted-foreground">{new Date(String(entry.created_at)).toLocaleString("en-AU")}</time></div><p className="text-xs text-muted-foreground">{String(entry.subject_type)} · {String(entry.subject_id)} · actor {String(entry.actor)}</p></li>) : <EmptyState text="Audit events will appear here after the first secure command." />}</ol></CardContent></Card>; }
+function Audit({ data }: { data: Data }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Audit timeline</CardTitle>
+        <CardDescription>Read-only visibility for invitations, roster changes, authority, grants, and participant records.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ol className="space-y-3">
+          {data.audit.length
+            ? data.audit.map((entry) => (
+                <li key={String(entry.id)} className="border-l-2 border-primary/30 pl-4">
+                  <div className="flex flex-wrap justify-between gap-2"><strong>{String(entry.action)}</strong><time className="text-xs text-muted-foreground">{new Date(String(entry.created_at)).toLocaleString("en-AU")}</time></div>
+                  <p className="text-xs text-muted-foreground">{String(entry.subject_type)} · {String(entry.subject_id)} · actor {String(entry.actor)}</p>
+                </li>
+              ))
+            : <EmptyState text="Audit events will appear here after the first secure command." />}
+        </ol>
+      </CardContent>
+    </Card>
+  );
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   const fieldId = useId();
