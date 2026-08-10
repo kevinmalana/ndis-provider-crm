@@ -181,6 +181,29 @@ const Param = { name: "string", type: "string" };
 type ParamSpec = { name: string; type: string };
 
 const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
+  cmd_admin_create_participant: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "first_name", type: "text" }, { name: "last_initial", type: "text" },
+      { name: "critical_content", type: "text" }, { name: "review_due_at", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_shift: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "participant_id", type: "uuid" }, { name: "worker_membership", type: "uuid" },
+      { name: "scheduled_start", type: "timestamptz" }, { name: "scheduled_end", type: "timestamptz" },
+      { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_grant: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
+      { name: "recipient_profile_id", type: "uuid" }, { name: "purpose", type: "text" }, { name: "scope_categories", type: "text[]" },
+      { name: "consent_basis", type: "text" }, { name: "consent_reference", type: "text" }, { name: "evidence_reference", type: "text" },
+      { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_accept_invitation: {
     params: [{ name: "token", type: "text" }],
   },

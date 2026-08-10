@@ -208,7 +208,6 @@ The component lands in `src/components/ui/<name>.tsx` consuming our token alias 
 
 ## Out of scope (later tickets)
 
-- Admin dashboard UI (roster, participant CRUD, exports)
 - Worker mobile experience (real `/worker/today`, shift detail, service notes, offline)
 - Participant portal
 - External coordinator view

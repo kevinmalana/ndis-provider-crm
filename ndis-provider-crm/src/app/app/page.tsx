@@ -24,9 +24,8 @@ export default async function AppHome() {
           Welcome, {greeting}
         </h1>
         <p className="text-sm text-muted-foreground">
-          You are signed in. Admin, worker, participant, and external
-          surfaces land in their own tickets. The header above shows your
-          active organisation and role.
+          You are signed in. Use the role-aware navigation above to open the
+          workspace available to your active organisation and membership.
         </p>
       </header>
 

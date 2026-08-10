@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import Link from "next/link";
 
 import { SignOutButton } from "@/components/layout/sign-out-button";
 import { loadMembershipContext } from "@/lib/membership";
@@ -55,6 +56,11 @@ export default async function AppLayout({
               Signed in as {displayName} · role {roleLabel}
             </p>
           </div>
+          {active && (active.role === "admin" || active.role === "scheduler") ? (
+            <Link className="rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted" href="/app/admin">
+              Admin workspace
+            </Link>
+          ) : null}
           <SignOutButton />
         </div>
       </header>

@@ -25,6 +25,9 @@ import type {
   ResolveConflictRpcArgs,
   SubmitSummaryRpcArgs,
   VersionedCommandRpcArgs,
+  AdminCommandResult,
+  AdminCreateParticipantRpcArgs,
+  AdminCreateShiftRpcArgs,
 } from "@/lib/supabase/types.domain";
 
 type RpcClient = SupabaseClient;
@@ -160,3 +163,32 @@ export async function listMyReceipts(
   if (error) throw error;
   return (data ?? []) as unknown as CommandReceipt[];
 }
+
+async function adminRpc(client: RpcClient, name: string, args: Record<string, unknown>): Promise<AdminCommandResult> {
+  const { data, error } = await client.rpc(name, args);
+  if (error) throw error;
+  return data as AdminCommandResult;
+}
+
+export const cmdAdminInvite = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_invite", args);
+
+export const cmdAdminCreateParticipant = (
+  client: RpcClient,
+  args: AdminCreateParticipantRpcArgs,
+) => adminRpc(client, "cmd_admin_create_participant", args as unknown as Record<string, unknown>);
+
+export const cmdAdminSetAuthority = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_set_authority", args);
+
+export const cmdAdminCreateGrant = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_create_grant", args);
+
+export const cmdAdminRevokeGrant = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_revoke_grant", args);
+
+export const cmdAdminSetAvailability = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_set_availability", args);
+
+export const cmdAdminCreateShift = (client: RpcClient, args: AdminCreateShiftRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_shift", args as unknown as Record<string, unknown>);

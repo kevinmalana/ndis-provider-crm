@@ -499,3 +499,36 @@ export interface ApplyCorrectionRpcArgs {
   p_reason: string;
   p_payload: Record<string, unknown>;
 }
+
+export interface AdminCommandResult extends CommandResult {
+  participant_id?: UUID;
+  critical_info_card_id?: UUID;
+  authority_id?: UUID;
+  grant_id?: UUID;
+  availability_id?: UUID;
+  invitation_id?: UUID;
+  shift_id?: UUID;
+  assignment_id?: UUID;
+  warnings?: string[];
+}
+
+export interface AdminCreateParticipantRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_first_name: string;
+  p_last_initial: string;
+  p_critical_content: string;
+  p_review_due_at: IsoTimestamp;
+  p_payload: Record<string, unknown>;
+}
+
+export interface AdminCreateShiftRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_participant_id: UUID;
+  p_worker_membership: UUID;
+  p_scheduled_start: IsoTimestamp;
+  p_scheduled_end: IsoTimestamp;
+  p_reason: string;
+  p_payload: Record<string, unknown>;
+}
