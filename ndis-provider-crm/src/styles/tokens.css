@@ -30,13 +30,14 @@
   --color-accent-fg: #ffffff;
   --color-accent-hover: #1d4ed8;
 
-  --color-success: #16a34a;
+  /* Semantic text pairs are chosen to remain AA on their foreground. */
+  --color-success: #166534;
   --color-success-fg: #ffffff;
   --color-warning: #f59e0b;
   --color-warning-fg: #1f2937;
   --color-danger: #dc2626;
   --color-danger-fg: #ffffff;
-  --color-info: #0ea5e9;
+  --color-info: #075985;
   --color-info-fg: #ffffff;
 
   --color-focus-ring: #2563eb;
@@ -96,9 +97,11 @@
   --easing-standard: cubic-bezier(0.2, 0, 0, 1);
   --easing-emphasized: cubic-bezier(0.3, 0, 0, 1);
 
-  /* Touch targets — 44 px floor above WCAG 24 px minimum.
-     Worker-app CTAs and form controls must use this minimum. */
-  --touch-min: 44px;
+  /* Touch targets: ordinary controls meet the WCAG 2.2 AA 24 CSS-px floor;
+     worker-facing controls use the larger 48 CSS-px target. */
+  --touch-ordinary-min: 24px;
+  --touch-worker-min: 48px;
+  --touch-min: var(--touch-ordinary-min);
 
   /* Z-index scale */
   --z-dropdown: 50;
@@ -108,10 +111,12 @@
 }
 
 /*
- * Per-organisation theming hook.
- * Example (do not enable yet — later ticket):
+ * Per-organisation theming hook. Only server-validated themes may opt in by
+ * setting data-theme-validated="true". Every override retains a literal,
+ * contrast-safe fallback so an invalid tenant value cannot erase a token.
+ * Example:
  *
- *   [data-org="acme-ndis"] {
+ *   [data-org="acme-ndis"][data-theme-validated="true"] {
  *     --color-primary: #0f766e;
  *     --color-primary-fg: #ffffff;
  *   }
@@ -120,3 +125,10 @@
  * resolved. Brand colours must pass contrast validation server-side before
  * they are accepted; rejected colours fall back to the base value above.
  */
+
+[data-org][data-theme-validated="true"] {
+  --color-primary: var(--tenant-primary, #18181b);
+  --color-primary-fg: var(--tenant-primary-fg, #fafafa);
+  --color-accent: var(--tenant-accent, #2563eb);
+  --color-accent-fg: var(--tenant-accent-fg, #ffffff);
+}

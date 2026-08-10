@@ -70,8 +70,75 @@
     text-decoration: none;
   }
   :focus-visible {
-    outline: 2px solid var(--color-focus-ring);
-    outline-offset: 2px;
+    outline: 3px solid var(--color-focus-ring);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 1px var(--color-bg);
+  }
+  :target {
+    scroll-margin-block: 5rem;
+  }
+}
+
+/* Keep focus, sticky actions and status messages usable when motion or colour
+ * is constrained by the operating system or user agent. */
+.focus-safe-sticky-action {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--color-bg) 96%, transparent);
+  border-top: 1px solid var(--color-border-strong);
+  box-shadow: 0 -0.5rem 1rem color-mix(in srgb, var(--color-fg) 12%, transparent);
+  scroll-margin-bottom: 6rem;
+}
+
+.worker-control {
+  min-width: var(--touch-worker-min);
+  min-height: var(--touch-worker-min);
+}
+
+.ordinary-control {
+  min-width: var(--touch-ordinary-min);
+  min-height: var(--touch-ordinary-min);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  *,
+  *::before,
+  *::after {
+    border-color: ButtonText;
+  }
+
+  :focus-visible {
+    outline: 3px solid Highlight;
+    box-shadow: none;
+  }
+
+  button,
+  [role="button"],
+  input,
+  select,
+  textarea {
+    forced-color-adjust: none;
+    border: 1px solid ButtonText;
+    color: ButtonText;
+    background: Canvas;
+  }
+
+  .focus-safe-sticky-action {
+    background: Canvas;
+    box-shadow: none;
   }
 }
 
