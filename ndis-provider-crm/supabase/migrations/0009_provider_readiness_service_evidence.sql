@@ -191,6 +191,8 @@ begin
   if c.id is null or c.lifecycle_state <> 'active' or c.reviewer_profile_id is null or c.effective_from > p_start or c.effective_until < p_end then return pg_catalog.jsonb_build_object('ready',false,'reason','context_not_current'); end if;
   select * into cap from public.organisation_support_capabilities where id=c.capability_id and organisation_id=p_organisation_id and status='active' and capability='individual_time_supported' and effective_from <= p_start and (effective_until is null or effective_until >= p_end);
   if cap.id is null then return pg_catalog.jsonb_build_object('ready',false,'reason','capability_not_supported'); end if;
+  select * into scope from public.organisation_provider_scope_versions where id=cap.scope_version_id and organisation_id=p_organisation_id and status='active' and effective_from <= p_start and (effective_until is null or effective_until >= p_end);
+  if scope.id is null then return pg_catalog.jsonb_build_object('ready',false,'reason','provider_scope_not_current'); end if;
   select * into item from public.provider_support_items where id=c.catalogue_item_id and organisation_id=p_organisation_id and status='active' and time_unit in ('hour','minute') and effective_from <= p_start and (effective_until is null or effective_until >= p_end);
   if item.id is null or item.service_kind <> cap.service_kind or item.support_category <> cap.support_category then return pg_catalog.jsonb_build_object('ready',false,'reason','catalogue_mismatch'); end if;
   select * into m from public.organisation_memberships where id=p_worker_membership_id and organisation_id=p_organisation_id and status='active' and role='worker' and effective_from <= p_start and (effective_until is null or effective_until >= p_end);
