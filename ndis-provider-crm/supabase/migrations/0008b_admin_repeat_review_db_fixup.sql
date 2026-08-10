@@ -36,8 +36,10 @@ set search_path = '';
 --
 -- The original Ticket 05 migration created participant_consent_evidence
 -- with `version integer not null default 1`. A pre-b30 deployment of
--- the table may be missing that column. The statements below are
--- idempotent: re-running them is safe and produces the same end state.
+-- the table may be missing that column AND may already hold multiple
+-- rows per (org, participant, recipient) without a supersession
+-- chain. The statements below are idempotent: re-running them is
+-- safe and produces the same end state.
 ------------------------------------------------------------------------
 
 alter table public.participant_consent_evidence
@@ -61,11 +63,45 @@ begin
       null;
     end;
 
-    -- Backfill any pre-b30 rows that may have a NULL version. New rows
-    -- always insert version explicitly so this only runs on upgrade.
-    update public.participant_consent_evidence
-      set version = 1
-      where version is null;
+    -- Pre-version populated upgrade: assign deterministic
+    -- row_number versions across duplicate-history rows so the
+    -- (org, participant, recipient, version) uniqueness constraint
+    -- never collides on upgrade. All pre-b30 rows are preserved;
+    -- only the legacy active duplicates get chained via superseded_by
+    -- so the newest row per group is the unique unsuperseded current.
+    --
+    -- For each (org, participant, recipient) group:
+    --   * order the rows by created_at (then id) ascending,
+    --   * assign version = row_number(),
+    --   * set superseded_by = next row's id (NULL for the newest row),
+    --   * preserve original status; do not rewrite history.
+    --
+    -- Idempotency: rows that already carry a non-null version are
+    -- left alone. Re-runs after a successful first upgrade skip
+    -- every row.
+    with versioned as (
+      select
+        id,
+        organisation_id,
+        participant_id,
+        recipient_profile_id,
+        consent_basis,
+        row_number() over (
+          partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+          order by created_at asc, id asc
+        ) as new_version,
+        lead(id) over (
+          partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+          order by created_at asc, id asc
+        ) as new_superseded_by
+      from public.participant_consent_evidence
+      where version is null
+    )
+    update public.participant_consent_evidence p
+      set version       = v.new_version,
+          superseded_by = v.new_superseded_by
+      from versioned v
+      where p.id = v.id;
 
     alter table public.participant_consent_evidence
       alter column version set default 1,
@@ -280,6 +316,22 @@ begin
     raise exception 'external_recipient_membership_required';
   end if;
 
+  -- Exactly one current consent leaf per (org, participant, recipient,
+  -- consent_basis). If an unsuperseded active row already exists, this
+  -- function refuses to fork the lineage; the caller must use
+  -- cmd_admin_renew_consent with expected_current_consent_id instead.
+  if exists (
+    select 1
+    from public.participant_consent_evidence
+    where organisation_id      = p_organisation_id
+      and participant_id       = p_participant_id
+      and recipient_profile_id = p_recipient_profile_id
+      and consent_basis        = p_consent_basis
+      and superseded_by        is null
+  ) then
+    raise exception 'consent_lineage_exists';
+  end if;
+
   if p_consent_basis = 'participant' then
     -- Authoriser is the participant themselves. Require:
     --   * a live same-tenant participant membership, AND
@@ -454,7 +506,7 @@ begin
     raise exception 'consent_evidence_required';
   end if;
 
-  -- Lock the current consent row to prevent concurrent renewal.
+  -- Lock the supplied consent row to prevent concurrent renewal.
   select * into v_current
   from public.participant_consent_evidence
   where id = p_consent_id and organisation_id = p_organisation_id
@@ -464,17 +516,20 @@ begin
     raise exception 'consent_record_not_found';
   end if;
 
-  -- If the locked row has already been superseded, walk the edge to
-  -- the live current version. The actor's expected current must
-  -- match the live current version; a stale renewal is preserved as
-  -- a conflict receipt and the existing current is unchanged.
-  if v_current.superseded_by is not null then
+  -- Walk the full successor chain under lock so the actor's expected
+  -- current is compared against the live leaf even when the supplied
+  -- id sits several supersessions deep. The chain ends at the row
+  -- whose superseded_by is null.
+  while v_current.superseded_by is not null loop
     select * into v_current
     from public.participant_consent_evidence
     where id              = v_current.superseded_by
       and organisation_id = p_organisation_id
     for update;
-  end if;
+    if v_current.id is null then
+      raise exception 'consent_record_not_found';
+    end if;
+  end loop;
 
   if p_expected_current_consent_id <> v_current.id then
     perform public.finalize_admin_command(
@@ -579,12 +634,47 @@ begin
   )
   returning * into v_new;
 
-  -- Mark the prior current as superseded by the new consent. The new
-  -- consent itself has superseded_by = NULL (it is the live current).
+  -- Mark the prior current as superseded by the new consent. The
+  -- predecessor update is conditional on superseded_by IS NULL — a
+  -- concurrent renewal that already advanced the chain leaves the
+  -- current row's edge unchanged; this renewal is preserved as
+  -- conflict evidence and never rewrites an existing edge.
   update public.participant_consent_evidence
     set superseded_by = v_new.id,
         updated_at    = pg_catalog.now()
-    where id = v_current.id;
+    where id              = v_current.id
+      and superseded_by  is null;
+  if not found then
+    -- Concurrent renewal: the prior leaf has already been superseded
+    -- by another actor between our chain walk and our update. The new
+    -- consent row is still inserted (history is preserved), but its
+    -- superseded_by edge is not stamped onto the prior leaf — that
+    -- edge already belongs to the concurrent renewal. Surface the
+    -- conflict as evidence rather than silently dropping the row or
+    -- rewriting an edge.
+    perform public.finalize_admin_command(
+      v_reserved.receipt_id,
+      pg_catalog.jsonb_build_object(
+        'consent_id', v_new.id,
+        'conflict', 'concurrent_renewal',
+        'expected_consent_id', p_expected_current_consent_id
+      )
+    );
+    insert into public.audit_log(organisation_id, actor, action, subject_type, subject_id, metadata)
+    values (
+      p_organisation_id, auth.uid(), 'consent.renewed.concurrent',
+      'participant_consent_evidence', v_new.id,
+      pg_catalog.jsonb_build_object(
+        'expected_consent_id', p_expected_current_consent_id,
+        'version', v_next_version
+      )
+    );
+    return pg_catalog.jsonb_build_object(
+      'status','conflict_preserved','reason','concurrent_renewal',
+      'consent_id', v_new.id,
+      'receipt_id', v_reserved.receipt_id
+    );
+  end if;
 
   insert into public.audit_log(organisation_id, actor, action, subject_type, subject_id, metadata)
   values (
@@ -688,8 +778,17 @@ begin
     pg_catalog.jsonb_build_object('role',p_role,'expires_at',p_expires_at)
   );
 
+  -- The token is included in the receipt outcome so the original
+  -- actor can recover the copy-link on a committed-but-lost duplicate
+  -- retry without exposing it to anyone outside the issuing actor's
+  -- receipt lookup scope.
   v_outcome := pg_catalog.jsonb_build_object(
-    'invitation_id',v_inv.id,'role',p_role,'email_delivery','copy_link'
+    'invitation_id', v_inv.id,
+    'role', p_role,
+    'email_delivery', 'copy_link',
+    'token', v_inv.token,
+    'email', v_inv.email,
+    'expires_at', v_inv.expires_at
   );
 
   perform public.finalize_admin_command(v_reserved.receipt_id, v_outcome);
@@ -1054,11 +1153,16 @@ begin
     );
   end if;
 
+  -- Grants require the unique unsuperseded current leaf. A consent
+  -- that has been superseded is no longer current — the live leaf for
+  -- its (org, participant, recipient) group is its successor, which
+  -- has superseded_by IS NULL.
   select * into v_consent
   from public.participant_consent_evidence
   where id              = p_consent_id
     and organisation_id = p_organisation_id
     and status          = 'active'
+    and superseded_by  is null
     and effective_from  <= pg_catalog.now()
     and effective_until > pg_catalog.now()
   for update;

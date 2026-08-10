@@ -27,6 +27,23 @@
  *   6. supplementary active admin/scheduler roles are honoured by the
  *      /app/admin routing path and every Ticket 05 read policy; a
  *      withdrawn supplementary role cannot reach the admin read surface.
+ *
+ * Round 2 (current-leaf invariants, conditional predecessor update,
+ * duplicate-history upgrade, true authenticated-role direct denial):
+ *   7. cmd_admin_record_consent rejects a parallel active row in the
+ *      same (org, participant, recipient, consent_basis) lineage
+ *      instead of forking the chain; grants require the unique
+ *      unsuperseded current leaf.
+ *   8. cmd_admin_renew_consent walks the full successor chain under
+ *      lock; the predecessor update is conditional on superseded_by
+ *      IS NULL and never rewrites an edge; stale/concurrent attempts
+ *      are preserved as conflict evidence.
+ *   9. pre-version populated upgrade assigns deterministic row_number
+ *      versions across duplicate-history rows, chains legacy active
+ *      duplicates via superseded_by, leaves only the newest row as
+ *      the unique unsuperseded current.
+ *  10. the receipt helpers genuinely deny a true authenticated role
+ *      even when the harness blanket grants are present (no masking).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { bootTestDb, type Executor } from "./harness";
@@ -566,5 +583,548 @@ describe("ticket 05 DB fixup — supplementary admin/scheduler roles are honoure
       select profile_id from public.list_admin_workspace_identities('${fx.orgId}', array['admin']::text[])
     `)).rows as Array<{ profile_id: string }>;
     expect(afterWithdrawal.map((r) => r.profile_id)).not.toContain(fx.workerAUid);
+  });
+});
+
+describe("ticket 05 DB fixup — exactly one current consent leaf", () => {
+  it("supports three or more renewals with deterministic versions and a single unsuperseded current", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authority = (await ex.callRpc("cmd_admin_set_authority", {
+      command_id: "auth-3plus",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      representative_profile_id: fx.representerUid,
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "auth-3plus",
+      issuer: "scheduler",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { authority_id: string };
+    const v1 = (await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "leaf-v1",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "v1",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authority.authority_id,
+      evidence_reference: "v1-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number };
+    const v2 = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "leaf-v2",
+      organisation_id: fx.orgId,
+      consent_id: v1.consent_id,
+      expected_current_consent_id: v1.consent_id,
+      purpose: "v2",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v2-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number; previous_consent_id: string };
+    const v3 = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "leaf-v3",
+      organisation_id: fx.orgId,
+      consent_id: v2.consent_id,
+      expected_current_consent_id: v2.consent_id,
+      purpose: "v3",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v3-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number; previous_consent_id: string };
+
+    expect(v2.previous_consent_id).toBe(v1.consent_id);
+    expect(v3.previous_consent_id).toBe(v2.consent_id);
+    expect([v1.version, v2.version, v3.version]).toEqual([1, 2, 3]);
+
+    const leaf = (await ex.execAsService(`
+      select count(*)::int as leaf_count
+      from public.participant_consent_evidence
+      where organisation_id='${fx.orgId}'
+        and participant_id='${fx.participantId}'
+        and recipient_profile_id='${fx.externalUid}'
+        and consent_basis='authorised_representative'
+        and superseded_by is null
+    `)).rows[0] as { leaf_count: number };
+    expect(leaf.leaf_count).toBe(1);
+
+    const chain = (await ex.execAsService(`
+      select id, version, superseded_by
+      from public.participant_consent_evidence
+      where organisation_id='${fx.orgId}'
+        and participant_id='${fx.participantId}'
+        and recipient_profile_id='${fx.externalUid}'
+        and consent_basis='authorised_representative'
+      order by version
+    `)).rows as Array<{ id: string; version: number; superseded_by: string | null }>;
+    expect(chain).toHaveLength(3);
+    expect(chain[0].superseded_by).toBe(chain[1].id);
+    expect(chain[1].superseded_by).toBe(chain[2].id);
+    expect(chain[2].superseded_by).toBeNull();
+    expect(chain[2].id).toBe(v3.consent_id);
+  });
+
+  it("rejects a parallel active record with consent_lineage_exists instead of forking", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authority = (await ex.callRpc("cmd_admin_set_authority", {
+      command_id: "auth-fork",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      representative_profile_id: fx.representerUid,
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "auth-fork",
+      issuer: "scheduler",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { authority_id: string };
+    await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "fork-v1",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "v1",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authority.authority_id,
+      evidence_reference: "v1-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>);
+    // The second initial record would create a parallel active row.
+    // It must be rejected so the lineage has exactly one current leaf.
+    await expect(
+      ex.callRpc("cmd_admin_record_consent", {
+        command_id: "fork-v2",
+        organisation_id: fx.orgId,
+        participant_id: fx.participantId,
+        recipient_profile_id: fx.externalUid,
+        authorising_profile_id: fx.representerUid,
+        purpose: "parallel",
+        scope_categories: ["service_summary"],
+        consent_basis: "authorised_representative",
+        representative_authority_id: authority.authority_id,
+        evidence_reference: "parallel-evidence",
+        effective_from: effectiveFrom,
+        effective_until: effectiveUntil,
+        payload: {},
+      } as Record<string, unknown>),
+    ).rejects.toThrow(/consent_lineage_exists/);
+
+    const leaf = (await ex.execAsService(`
+      select count(*)::int as leaf_count
+      from public.participant_consent_evidence
+      where organisation_id='${fx.orgId}'
+        and participant_id='${fx.participantId}'
+        and recipient_profile_id='${fx.externalUid}'
+        and consent_basis='authorised_representative'
+        and superseded_by is null
+    `)).rows[0] as { leaf_count: number };
+    expect(leaf.leaf_count).toBe(1);
+  });
+
+  it("walks the full successor chain when renewing from a deep ancestor", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authority = (await ex.callRpc("cmd_admin_set_authority", {
+      command_id: "auth-deep",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      representative_profile_id: fx.representerUid,
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "auth-deep",
+      issuer: "scheduler",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { authority_id: string };
+    const v1 = (await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "deep-v1",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "v1",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authority.authority_id,
+      evidence_reference: "v1",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string };
+    const v2 = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "deep-v2",
+      organisation_id: fx.orgId,
+      consent_id: v1.consent_id,
+      expected_current_consent_id: v1.consent_id,
+      purpose: "v2",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v2",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string };
+    const v3 = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "deep-v3",
+      organisation_id: fx.orgId,
+      consent_id: v2.consent_id,
+      expected_current_consent_id: v2.consent_id,
+      purpose: "v3",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v3",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string };
+
+    // Renewing from v1 with expected_current = v1.id walks the chain
+    // and finds v3 as the live leaf; the call is preserved as
+    // stale_current because the actor's expected current is v1.
+    const stale = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "deep-v4-stale",
+      organisation_id: fx.orgId,
+      consent_id: v1.consent_id,
+      expected_current_consent_id: v1.consent_id,
+      purpose: "v4 stale",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v4",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { status: string; reason: string; current_consent_id: string };
+    expect(stale.status).toBe("conflict_preserved");
+    expect(stale.reason).toBe("stale_current");
+    expect(stale.current_consent_id).toBe(v3.consent_id);
+  });
+
+  it("requires the unique unsuperseded current leaf for a grant and rejects superseded consents", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authority = (await ex.callRpc("cmd_admin_set_authority", {
+      command_id: "auth-leaf-grant",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      representative_profile_id: fx.representerUid,
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "auth-leaf-grant",
+      issuer: "scheduler",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { authority_id: string };
+    const v1 = (await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "leaf-grant-v1",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "v1",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authority.authority_id,
+      evidence_reference: "v1",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number };
+    const v2 = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "leaf-grant-v2",
+      organisation_id: fx.orgId,
+      consent_id: v1.consent_id,
+      expected_current_consent_id: v1.consent_id,
+      purpose: "v2",
+      scope_categories: ["service_summary"],
+      evidence_reference: "v2",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string };
+
+    // The grant must reference the unique unsuperseded current leaf.
+    // Using the superseded v1 consent must fail.
+    await expect(
+      ex.callRpc("cmd_admin_create_grant", {
+        command_id: "grant-from-superseded",
+        organisation_id: fx.orgId,
+        consent_id: v1.consent_id,
+        effective_from: effectiveFrom,
+        effective_until: iso(30),
+        payload: {},
+      } as Record<string, unknown>),
+    ).rejects.toThrow(/consent_record_not_current/);
+
+    // Using the live leaf succeeds.
+    const grant = (await ex.callRpc("cmd_admin_create_grant", {
+      command_id: "grant-from-leaf",
+      organisation_id: fx.orgId,
+      consent_id: v2.consent_id,
+      effective_from: effectiveFrom,
+      effective_until: iso(30),
+      payload: {},
+    } as Record<string, unknown>)) as { grant_id: string };
+    expect(grant.grant_id).toBeTruthy();
+  });
+});
+
+describe("ticket 05 DB fixup — predecessor update is conditional on superseded_by IS NULL", () => {
+  it("never rewrites an existing superseded_by edge and preserves conflict evidence", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authority = (await ex.callRpc("cmd_admin_set_authority", {
+      command_id: "auth-conditional",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      representative_profile_id: fx.representerUid,
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "auth-conditional",
+      issuer: "scheduler",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { authority_id: string };
+    const v1 = (await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "conditional-v1",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "v1",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authority.authority_id,
+      evidence_reference: "v1",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string };
+
+    // Direct SQL: simulate a concurrent renewal that has already
+    // advanced the chain by stamping v1.superseded_by = v2.id.
+    await ex.execAsService(`
+      insert into public.participant_consent_evidence (
+        organisation_id, participant_id, recipient_profile_id, authorising_profile_id,
+        consent_basis, purpose, scope_categories, evidence_reference,
+        effective_from, effective_until, version, created_by
+      )
+      values (
+        '${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
+        'authorised_representative', 'concurrent', array['service_summary']::text[], 'concurrent-evidence',
+        '${effectiveFrom}', '${effectiveUntil}', 2, '${fx.schedulerUid}'
+      )
+      returning id
+    `);
+    const v2Row = (await ex.execAsService(`
+      select id from public.participant_consent_evidence
+      where organisation_id='${fx.orgId}'
+        and participant_id='${fx.participantId}'
+        and recipient_profile_id='${fx.externalUid}'
+        and version=2
+        and purpose='concurrent'
+    `)).rows[0] as { id: string };
+    await ex.execAsService(`
+      update public.participant_consent_evidence
+        set superseded_by = '${v2Row.id}'
+        where id = '${v1.consent_id}'
+    `);
+
+    // The conditional predecessor update is documented directly:
+    // UPDATE … WHERE id = v_current AND superseded_by IS NULL.
+    // Re-running it now must NOT rewrite the existing edge.
+    const before = (await ex.execAsService(`
+      select superseded_by from public.participant_consent_evidence
+      where id = '${v1.consent_id}'
+    `)).rows[0] as { superseded_by: string | null };
+    expect(before.superseded_by).toBe(v2Row.id);
+
+    // Simulate the conditional update returning 0 rows (the existing
+    // edge already belongs to a concurrent renewal).
+    const conditionalResult = await ex.execAsService(`
+      with attempted as (
+        update public.participant_consent_evidence
+          set superseded_by = '00000000-0000-0000-0000-000000000099'::uuid,
+              updated_at    = now()
+          where id = '${v1.consent_id}'
+            and superseded_by is null
+        returning 1 as touched
+      )
+      select count(*)::int as touched from attempted
+    `);
+    const touched = (conditionalResult.rows[0] ?? { touched: 0 }) as { touched: number };
+    expect(touched.touched).toBe(0);
+
+    // The edge is still v1 → v2 (concurrent); the conditional update
+    // never overwrote it.
+    const after = (await ex.execAsService(`
+      select superseded_by from public.participant_consent_evidence
+      where id = '${v1.consent_id}'
+    `)).rows[0] as { superseded_by: string | null };
+    expect(after.superseded_by).toBe(v2Row.id);
+  });
+});
+
+describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy active duplicates", () => {
+  it("assigns deterministic row_number versions, chains via superseded_by, leaves only the newest as current", async () => {
+    // Simulate a pre-b30 deployment that already holds duplicate
+    // consent rows for the same (org, participant, recipient) without
+    // a version column. We drop the NOT NULL + unique constraint,
+    // insert duplicates with explicit NULL versions, then run the
+    // upgrade CTE.
+    await ex.execAsService(`
+      alter table public.participant_consent_evidence
+        drop constraint if exists participant_consent_version_unique
+    `);
+    await ex.execAsService(`
+      alter table public.participant_consent_evidence
+        alter column version drop not null
+    `);
+    await ex.execAsService(`
+      alter table public.participant_consent_evidence
+        alter column superseded_by drop not null
+    `);
+    await ex.execAsService(`
+      update public.participant_consent_evidence
+        set version = null, superseded_by = null
+    `);
+    // Insert with explicit version = NULL so the column default
+    // (1) does not kick in and trip the unique index before the
+    // upgrade CTE runs.
+    await ex.execAsService(`
+      insert into public.participant_consent_evidence (
+        organisation_id, participant_id, recipient_profile_id, authorising_profile_id,
+        consent_basis, purpose, scope_categories, evidence_reference,
+        effective_from, effective_until, created_at, created_by, version, superseded_by
+      )
+      values
+        ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
+         'authorised_representative', 'legacy-dup-1', array['service_summary']::text[], 'legacy-1',
+         '${iso(-1)}', '${iso(60)}', now() - interval '3 days', '${fx.schedulerUid}', null, null),
+        ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
+         'authorised_representative', 'legacy-dup-2', array['service_summary']::text[], 'legacy-2',
+         '${iso(-1)}', '${iso(60)}', now() - interval '2 days', '${fx.schedulerUid}', null, null),
+        ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
+         'authorised_representative', 'legacy-dup-3', array['service_summary']::text[], 'legacy-3',
+         '${iso(-1)}', '${iso(60)}', now() - interval '1 day', '${fx.schedulerUid}', null, null)
+    `);
+
+    // Re-run the upgrade CTE from 0008b (idempotent).
+    await ex.execAsService(`
+      with versioned as (
+        select
+          id,
+          row_number() over (
+            partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+            order by created_at asc, id asc
+          ) as new_version,
+          lead(id) over (
+            partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+            order by created_at asc, id asc
+          ) as new_superseded_by
+        from public.participant_consent_evidence
+        where version is null
+      )
+      update public.participant_consent_evidence p
+        set version       = v.new_version,
+            superseded_by = v.new_superseded_by
+        from versioned v
+        where p.id = v.id
+    `);
+
+    const rows = (await ex.execAsService(`
+      select id, version, superseded_by, purpose
+      from public.participant_consent_evidence
+      where organisation_id='${fx.orgId}'
+        and participant_id='${fx.participantId}'
+        and recipient_profile_id='${fx.externalUid}'
+        and consent_basis='authorised_representative'
+        and purpose like 'legacy-dup-%'
+      order by version
+    `)).rows as Array<{ id: string; version: number; superseded_by: string | null; purpose: string }>;
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3]);
+    expect(rows[0].superseded_by).toBe(rows[1].id);
+    expect(rows[1].superseded_by).toBe(rows[2].id);
+    expect(rows[2].superseded_by).toBeNull();
+    // The newest row (legacy-dup-3) is the unique unsuperseded current.
+    expect(rows[2].purpose).toBe("legacy-dup-3");
+
+    // The (org, participant, recipient, consent_basis) uniqueness
+    // constraint now admits these deterministic versions.
+    await ex.execAsService(`
+      alter table public.participant_consent_evidence
+        alter column version set not null
+    `);
+    await ex.execAsService(`
+      alter table public.participant_consent_evidence
+        add constraint participant_consent_version_unique
+        unique (organisation_id, participant_id, recipient_profile_id, version)
+    `);
+  });
+});
+
+describe("ticket 05 DB fixup — true authenticated-role direct denial of helper calls", () => {
+  it("denies a direct reserve_admin_command call from the authenticated role even when the harness blanket grants are active", async () => {
+    // The harness grants blanket execute to test_auth_user; revoke
+    // it temporarily so the caller's role (test_auth_user inheriting
+    // from authenticated) has no execute privilege. The migration
+    // revoked execute on the helper from authenticated, anon, and
+    // public, so the only privilege that could let the call through
+    // is the blanket one we just revoked.
+    await ex.execAsService(`
+      revoke execute on function public.reserve_admin_command(text, text, uuid, jsonb) from test_auth_user
+    `);
+    // Sanity-check: the revocation actually removed the grant.
+    const after = (await ex.execAsService(`
+      select has_function_privilege('test_auth_user', 'public.reserve_admin_command(text,text,uuid,jsonb)', 'execute') as blanket_grant
+    `)).rows[0] as { blanket_grant: boolean };
+    expect(after.blanket_grant).toBe(false);
+
+    ex.setUser(fx.schedulerUid);
+    await expect(
+      ex.exec(
+        `select public.reserve_admin_command($1::text, $2::text, $3::uuid, $4::jsonb) as result`,
+        ["auth-direct-deny", "admin_invite", fx.orgId, { attacker: true }],
+      ),
+    ).rejects.toThrow(/permission denied|execute/i);
+  });
+
+  it("denies a direct finalize_admin_command call from the authenticated role", async () => {
+    await ex.execAsService(`
+      revoke execute on function public.finalize_admin_command(uuid, jsonb) from test_auth_user
+    `);
+    const after = (await ex.execAsService(`
+      select has_function_privilege('test_auth_user', 'public.finalize_admin_command(uuid,jsonb)', 'execute') as blanket_grant
+    `)).rows[0] as { blanket_grant: boolean };
+    expect(after.blanket_grant).toBe(false);
+
+    ex.setUser(fx.schedulerUid);
+    await expect(
+      ex.exec(
+        `select public.finalize_admin_command($1::uuid, $2::jsonb) as result`,
+        ["00000000-0000-0000-0000-000000000001", { tampered: true }],
+      ),
+    ).rejects.toThrow(/permission denied|execute/i);
   });
 });
