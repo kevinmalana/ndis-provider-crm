@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
 import { bootTestDb, type Executor } from "./harness";
 import { seedStandardFixture, type Fixture } from "./fixtures";
 
@@ -25,6 +26,22 @@ describe("Ticket 05b provider-readiness boundary", () => {
     expect(after.rows[0]).toMatchObject({ c: 0 });
   });
 
+  it("rolls back the whole migration when a late statement fails", async () => {
+    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+    try {
+      const migration = fs.readFileSync(new URL("../../supabase/migrations/0009_provider_readiness_service_evidence.sql", import.meta.url), "utf8");
+      const forcedFailure = migration.replace(/\ncommit;\s*$/, "\nselect 1 / 0;\ncommit;");
+      await expect(legacy.raw.exec(forcedFailure)).rejects.toThrow();
+      await legacy.raw.exec("rollback");
+      const oldCommand = await legacy.execAsService(`select count(*)::int as count from pg_proc where pronamespace='public'::regnamespace and proname='cmd_admin_create_shift'`);
+      const newRelation = await legacy.execAsService(`select to_regclass('public.shift_service_snapshots') as relation`);
+      expect(oldCommand.rows[0]).toMatchObject({ count: 1 });
+      expect(newRelation.rows[0]).toMatchObject({ relation: null });
+    } finally {
+      await legacy.raw.close();
+    }
+  });
+
 
   it("creates an immutable service snapshot and duplicate retry returns its receipt", async () => {
     ex.setUser(fx.schedulerUid);
@@ -38,15 +55,28 @@ describe("Ticket 05b provider-readiness boundary", () => {
   });
 
   it("marks context-free history as legacy and prevents action", async () => {
-    const legacyShift = "99999999-9999-4999-8999-999999999901";
-    const assignment = "99999999-9999-4999-8999-999999999902";
-    const worker = (await ex.execAsService(`select id from public.organisation_memberships where organisation_id='${fx.orgId}' and profile_id='${fx.workerAUid}'`)).rows[0] as { id: string };
-    await ex.execAsService(`insert into public.shifts(id,organisation_id,participant_id,scheduled_start,scheduled_end,state,version) values ('${legacyShift}','${fx.orgId}','${fx.participantId}','2026-08-07T14:00:00Z','2026-08-07T15:00:00Z','scheduled',1)`);
-    await ex.execAsService(`insert into public.shift_assignments(id,shift_id,organisation_id,membership_id,assigned_by) values ('${assignment}','${legacyShift}','${fx.orgId}','${worker.id}','${fx.adminUid}')`);
-    await ex.execAsService(`update public.shifts set state='legacy_incomplete' where id='${legacyShift}'`);
-    const row = await ex.execAsService(`select state from public.shifts where id='${legacyShift}'`);
+    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+    const org = "99999999-9999-4999-8999-999999999901";
+    const scheduler = "99999999-9999-4999-8999-999999999902";
+    const workerA = "99999999-9999-4999-8999-999999999903";
+    const workerB = "99999999-9999-4999-8999-999999999904";
+    const schedulerMembership = "99999999-9999-4999-8999-999999999905";
+    const workerAMembership = "99999999-9999-4999-8999-999999999906";
+    const workerBMembership = "99999999-9999-4999-8999-999999999907";
+    const participant = "99999999-9999-4999-8999-999999999908";
+    const legacyShift = "99999999-9999-4999-8999-999999999909";
+    await legacy.raw.exec(`insert into auth.users(id,email) values ('${scheduler}','scheduler@legacy.test'),('${workerA}','a@legacy.test'),('${workerB}','b@legacy.test'); insert into public.organisations(id,name,slug) values ('${org}','Legacy','legacy'); update public.global_profiles set full_name=case id when '${scheduler}' then 'Scheduler'::text when '${workerA}' then 'Worker A'::text else 'Worker B'::text end where id in ('${scheduler}','${workerA}','${workerB}'); insert into public.organisation_memberships(id,organisation_id,profile_id,role,status,effective_from) values ('${schedulerMembership}','${org}','${scheduler}','scheduler','active','2026-08-01'),('${workerAMembership}','${org}','${workerA}','worker','active','2026-08-01'),('${workerBMembership}','${org}','${workerB}','worker','active','2026-08-01'); insert into public.active_organisation_context(profile_id,organisation_id) values ('${scheduler}','${org}'),('${workerA}','${org}'); insert into public.participants(id,organisation_id,first_name,last_initial,created_by) values ('${participant}','${org}','Legacy','P','${scheduler}'); insert into public.shifts(id,organisation_id,participant_id,scheduled_start,scheduled_end,state,version) values ('${legacyShift}','${org}','${participant}','2026-08-07T14:00:00Z','2026-08-07T15:00:00Z','scheduled',1); insert into public.shift_assignments(shift_id,organisation_id,membership_id,assigned_by) values ('${legacyShift}','${org}','${workerAMembership}','${scheduler}')`);
+    const migration = fs.readFileSync(new URL("../../supabase/migrations/0009_provider_readiness_service_evidence.sql", import.meta.url), "utf8");
+    await legacy.raw.exec(migration);
+    const row = await legacy.execAsService(`select s.state,(select count(*)::int from public.shift_assignments a where a.shift_id=s.id) as assignments from public.shifts s where s.id='${legacyShift}'`);
     expect(row.rows[0]).toMatchObject({ state: "legacy_incomplete" });
-    ex.setUser(fx.workerAUid);
-    await expect(ex.callRpc("cmd_start_shift", { command_id: "legacy-start", shift_id: legacyShift, expected_version: 1, claimed_at: "2026-08-07T14:00:00Z", client_tz: "Australia/Sydney", payload: {} })).resolves.toMatchObject({ status: "conflict_preserved", reason: "invalid_state" });
+    expect(row.rows[0]).toMatchObject({ assignments: 1 });
+    legacy.setUser(scheduler);
+    await expect(legacy.callRpc("cmd_reassign_shift", { command_id: "legacy-reassign", shift_id: legacyShift, expected_version: 1, claimed_at: "2026-08-07T13:00:00Z", client_tz: "Australia/Sydney", new_worker_membership: workerBMembership, reason: "must fail", payload: {} })).rejects.toThrow("legacy_incomplete_not_actionable");
+    legacy.setUser(workerA);
+    await expect(legacy.callRpc("cmd_start_shift", { command_id: "legacy-start", shift_id: legacyShift, expected_version: 1, claimed_at: "2026-08-07T14:00:00Z", client_tz: "Australia/Sydney", payload: {} })).resolves.toMatchObject({ status: "conflict_preserved", reason: "invalid_state" });
+    const workerRows = await legacy.exec(`select id from public.shifts where id='${legacyShift}'`);
+    expect(workerRows.rows).toHaveLength(0);
+    await legacy.raw.close();
   });
 });

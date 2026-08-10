@@ -129,6 +129,111 @@ beforeEach(() => {
   });
 });
 
+const readinessData = {
+  ...initialData,
+  identities: [
+    ...initialData.identities,
+    { profile_id: "admin-1", full_name: "Alice Admin", email: "admin@example.test", role: "admin", membership_id: "m-admin-1" },
+    { profile_id: "scheduler-1", full_name: "Sam Scheduler", email: "scheduler@example.test", role: "scheduler", membership_id: "m-scheduler-1" },
+  ],
+  shifts: [{ id: "shift-ready", participant_id: "p-1", scheduled_start: "2026-09-01T09:00:00Z", scheduled_end: "2026-09-01T10:00:00Z", state: "scheduled" }],
+  serviceContexts: [{ id: "ctx-1", participant_id: "p-1", capability_id: "cap-1", catalogue_item_id: "item-1", role_version_id: "role-1", jurisdiction: "NSW", goal_reference: "Goal 1", lifecycle_state: "active" }],
+  providerScopes: [{ id: "scope-1", registration_state: "registered", jurisdictions: ["NSW"], status: "active" }],
+  capabilities: [{ id: "cap-1", support_category: "daily_living", service_kind: "individual_time", capability: "individual_time_supported", status: "active" }],
+  catalogues: [{ id: "catalogue-1", source_label: "Provider catalogue", source_version: "2026.1", status: "active" }],
+  catalogueItems: [{ id: "item-1", catalogue_version_id: "catalogue-1", item_code: "TIME-1", item_name: "Individual time", support_category: "daily_living", service_kind: "individual_time", time_unit: "hour", status: "active" }],
+  roles: [{ id: "role-1", title: "Support worker", risk_assessed: true, status: "active" }],
+  screeningPolicies: [],
+  screeningVerifications: [{ id: "verify-1", application_or_check_reference: "CHECK-1", clearance_status: "current" }],
+  screeningPathways: [],
+  competenceRequirements: [{ id: "requirement-1", evidence_type: "induction", support_category: "daily_living", requirement_state: "required" }],
+  competenceEvidence: [{ id: "evidence-1", evidence_reference: "COMP-1", assessed_state: "met" }],
+  maskedIdentifiers: [{ participant_id: "p-1", masked_identifier: "*******0123" }],
+  snapshots: [{ shift_id: "shift-ready", catalogue_version_id: "catalogue-1", item_code: "TIME-1", item_name: "Individual time", support_category: "daily_living", service_kind: "individual_time", time_unit: "hour", goal_reference: "Goal 1", goal_display: "Community access" }],
+  ackLedger: [{ id: "ack-current", shift_id: "shift-ready", event_class: "conclusive", event_type: "external_signed_evidence", source_channel: "provider_recorded", occurred_at: "2026-09-01T10:05:00Z", reason: "Initial evidence", current_leaf: true, review_only: false }],
+};
+
+describe("mounted AdminWorkspace — complete provider readiness surface", () => {
+  it("submits controlled catalogue values while unrelated readiness forms remain independently usable", async () => {
+    let release: ((value: unknown) => void) | undefined;
+    rpcMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={readinessData} />);
+    await clickTab("Readiness");
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Catalogue source"), { target: { value: "Controlled source" } });
+      fireEvent.change(screen.getByLabelText("Catalogue version"), { target: { value: "2026.9" } });
+      fireEvent.change(screen.getByLabelText("Item code"), { target: { value: "CONTROLLED-9" } });
+      fireEvent.change(screen.getByLabelText("Item name"), { target: { value: "Controlled individual support" } });
+      fireEvent.change(screen.getByLabelText("Time unit"), { target: { value: "minute" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Add time-based supported item" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    expect(rpcMock.mock.calls[0][0]).toBe("cmd_admin_create_catalogue_item");
+    expect(rpcMock.mock.calls[0][1]).toMatchObject({ p_source_label: "Controlled source", p_source_version: "2026.9", p_item_code: "CONTROLLED-9", p_item_name: "Controlled individual support", p_time_unit: "minute" });
+    expect(screen.getByRole("button", { name: "Add time-based supported item" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Record current screening verification" })).not.toBeDisabled();
+    await act(async () => release?.({ data: { status: "accepted" }, error: null }));
+  });
+
+  it("creates a reviewed role/jurisdiction-bound context and renders a server readiness recovery reason", async () => {
+    rpcMock.mockResolvedValueOnce({ data: { status: "accepted", service_context_id: "ctx-new" }, error: null });
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={readinessData} />);
+    await clickTab("Readiness");
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Context participant"), { target: { value: "p-1" } });
+      fireEvent.change(screen.getByLabelText("Context capability"), { target: { value: "cap-1" } });
+      fireEvent.change(screen.getByLabelText("Context catalogue item"), { target: { value: "item-1" } });
+      fireEvent.change(screen.getByLabelText("Context risk role"), { target: { value: "role-1" } });
+      fireEvent.change(screen.getByLabelText("Context jurisdiction"), { target: { value: "NSW" } });
+      fireEvent.change(screen.getByLabelText("Context owner"), { target: { value: "admin-1" } });
+      fireEvent.change(screen.getByLabelText("Active reviewer"), { target: { value: "scheduler-1" } });
+      fireEvent.change(screen.getByLabelText("External agreement reference"), { target: { value: "AGREEMENT-9" } });
+      fireEvent.change(screen.getByLabelText("Goal reference"), { target: { value: "GOAL-9" } });
+      fireEvent.change(screen.getByLabelText("Goal display"), { target: { value: "Community participation" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Create service context" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    expect(rpcMock.mock.calls[0][1]).toMatchObject({ p_role_version_id: "role-1", p_jurisdiction: "NSW", p_reviewer_profile_id: "scheduler-1", p_lifecycle_state: "active" });
+    rpcMock.mockResolvedValueOnce({ data: { ready: false, reason: "catalogue_version_not_current" }, error: null });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Readiness worker"), { target: { value: "m-worker-1" } });
+      fireEvent.change(screen.getByLabelText("Readiness context"), { target: { value: "ctx-1" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Check readiness" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(screen.getByText(/Create a current catalogue version whose window contains the item and shift/i)).toBeInTheDocument());
+    expect(rpcMock.mock.calls[1][0]).toBe("list_admin_provider_readiness");
+    expect(rpcMock.mock.calls[1][1]).toMatchObject({ p_worker_membership_id: "m-worker-1", p_participant_id: "p-1", p_context_id: "ctx-1" });
+  });
+
+  it("reveals identifiers through the audited RPC and corrects the current acknowledgement leaf", async () => {
+    rpcMock.mockResolvedValueOnce({ data: { status: "accepted", identifier: "43000000123" }, error: null });
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={readinessData} />);
+    await clickTab("Readiness");
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Identifier participant"), { target: { value: "p-1" } });
+      fireEvent.change(screen.getByLabelText("Reveal reason"), { target: { value: "Acceptance evidence review" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Reveal full identifier with audit" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(screen.getByText(/43000000123/)).toBeInTheDocument());
+    expect(rpcMock.mock.calls[0][0]).toBe("cmd_admin_reveal_participant_ndis_identifier");
+    expect(screen.getByText(/\*\*\*\*\*\*\*0123/)).toBeInTheDocument();
+    rpcMock.mockResolvedValueOnce({ data: { status: "accepted", event_id: "ack-corrected" }, error: null });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Service record"), { target: { value: "shift-ready" } });
+      fireEvent.change(screen.getByLabelText("Acknowledgement event"), { target: { value: "correction" } });
+      fireEvent.change(screen.getByLabelText("Reported signer authority"), { target: { value: "participant-1|participant_self" } });
+      fireEvent.change(screen.getByLabelText("External acknowledgement evidence reference"), { target: { value: "ACK-CORRECTION-1" } });
+      fireEvent.change(screen.getByLabelText("Evidence method"), { target: { value: "signed_external_form" } });
+      fireEvent.change(screen.getByLabelText("Correction reason"), { target: { value: "Supersede incorrect signed outcome" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Record provider acknowledgement" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    expect(rpcMock.mock.calls[1][1]).toMatchObject({ p_expected_current_event_id: "ack-current", p_method: "signed_external_form", p_reason: "Supersede incorrect signed outcome", p_event_type: "external_decline_evidence" });
+    expect(screen.getByText(/current outcome/i)).toBeInTheDocument();
+    expect(screen.getByText(/Provider catalogue · 2026.1 · hour/i)).toBeInTheDocument();
+  });
+});
+
 afterEach(() => {
   cleanup();
 });
@@ -182,7 +287,7 @@ async function fillCreateShift(): Promise<void> {
   });
 }
 
-async function clickTab(name: "Roster" | "Access" | "Audit" | "Overview" | "Participants"): Promise<void> {
+async function clickTab(name: "Roster" | "Readiness" | "Access" | "Audit" | "Overview" | "Participants"): Promise<void> {
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name }));
   });

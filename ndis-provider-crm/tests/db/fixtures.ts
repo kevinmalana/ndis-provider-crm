@@ -164,7 +164,7 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     `insert into public.participants (id, organisation_id, first_name, last_initial, created_by)
      values ('${ids.participantRow}','${ids.org}','Maya','R','${ids.admin}')`,
   );
-  await ex.execAsService(`insert into public.participant_service_context_versions (id,organisation_id,participant_id,capability_id,catalogue_item_id,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state) values ('${ids.context}','${ids.org}','${ids.participantRow}','${ids.capability}','${ids.item}','TEST-AGREEMENT','TEST-PLAN','provider_recorded','${ids.admin}','${ids.admin}','2026-08-06T00:00:00Z','2026-09-01T00:00:00Z','participant','TEST-GOAL','Test participant goal','active')`);
+  await ex.execAsService(`insert into public.participant_service_context_versions (id,organisation_id,participant_id,capability_id,catalogue_item_id,role_version_id,jurisdiction,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state) values ('${ids.context}','${ids.org}','${ids.participantRow}','${ids.capability}','${ids.item}','${ids.roleVersion}','NSW','TEST-AGREEMENT','TEST-PLAN','provider_recorded','${ids.admin}','${ids.admin}','2026-08-06T00:00:00Z','2026-09-01T00:00:00Z','participant','TEST-GOAL','Test participant goal','active')`);
 
   await ex.execAsService(
     `insert into public.participant_self_links
@@ -210,13 +210,13 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
      values ('${ids.shift}','${ids.org}','${ids.participantRow}','${start}','${end}','scheduled',${ids.shiftVersion})`,
   );
 
+  await ex.execAsService(`insert into public.shift_service_snapshots (id,organisation_id,shift_id,service_context_id,capability_id,catalogue_item_id,catalogue_version_id,item_code,item_name,support_category,service_kind,time_unit,goal_reference,goal_display,scheduled_start,scheduled_end) values ('${ids.snapshot}','${ids.org}','${ids.shift}','${ids.context}','${ids.capability}','${ids.item}','${ids.catalogue}','TEST-TIME','Test time support','daily_living','individual_time','hour','TEST-GOAL','Test participant goal','${start}','${end}')`);
   await ex.execAsService(
     `insert into public.shift_assignments
        (id, shift_id, organisation_id, membership_id, assigned_by)
      values
        ('${ids.assignmentA}','${ids.shift}','${ids.org}','${ids.membershipWorkerA}','${ids.admin}')`,
   );
-  await ex.execAsService(`insert into public.shift_service_snapshots (id,organisation_id,shift_id,service_context_id,capability_id,catalogue_item_id,catalogue_version_id,item_code,item_name,support_category,service_kind,time_unit,goal_reference,goal_display,scheduled_start,scheduled_end) values ('${ids.snapshot}','${ids.org}','${ids.shift}','${ids.context}','${ids.capability}','${ids.item}','${ids.catalogue}','TEST-TIME','Test time support','daily_living','individual_time','hour','TEST-GOAL','Test participant goal','${start}','${end}')`);
 
   return {
     orgId: ids.org,

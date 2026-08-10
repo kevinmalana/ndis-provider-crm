@@ -230,7 +230,7 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
   cmd_admin_create_service_context: {
     params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
-      { name: "capability_id", type: "uuid" }, { name: "catalogue_item_id", type: "uuid" }, { name: "external_agreement_reference", type: "text" },
+      { name: "capability_id", type: "uuid" }, { name: "catalogue_item_id", type: "uuid" }, { name: "role_version_id", type: "uuid" }, { name: "jurisdiction", type: "text" }, { name: "external_agreement_reference", type: "text" },
       { name: "plan_reference", type: "text" }, { name: "source_type", type: "text" }, { name: "owner_profile_id", type: "uuid" },
       { name: "reviewer_profile_id", type: "uuid" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" },
       { name: "goal_source", type: "text" }, { name: "goal_reference", type: "text" }, { name: "goal_display", type: "text" },
@@ -244,6 +244,21 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "event_class", type: "text" }, { name: "event_type", type: "text" }, { name: "reported_signer_profile_id", type: "uuid" },
       { name: "authority_type", type: "text" }, { name: "method", type: "text" }, { name: "occurred_at", type: "timestamptz" },
       { name: "reason", type: "text" }, { name: "external_evidence_reference", type: "text" }, { name: "expected_current_event_id", type: "uuid" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_set_ndis_identifier: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" }, { name: "identifier", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_reveal_participant_ndis_identifier: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" }, { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_update_service_context_state: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "context_id", type: "uuid" }, { name: "lifecycle_state", type: "text" }, { name: "reviewer_profile_id", type: "uuid" }, { name: "role_version_id", type: "uuid" }, { name: "jurisdiction", type: "text" }, { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
     ],
   },
   cmd_admin_create_provider_scope_version: {
@@ -315,6 +330,11 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "claimed_at", type: "timestamptz" },
       { name: "client_tz", type: "text" },
       { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_reassign_shift: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "shift_id", type: "uuid" }, { name: "expected_version", type: "bigint" }, { name: "claimed_at", type: "timestamptz" }, { name: "client_tz", type: "text" }, { name: "new_worker_membership", type: "uuid" }, { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
     ],
   },
   cmd_end_shift: {

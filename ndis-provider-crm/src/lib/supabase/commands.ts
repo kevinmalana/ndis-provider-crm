@@ -31,6 +31,9 @@ import type {
   AdminProviderScopeRpcArgs,
   AdminSupportCapabilityRpcArgs,
   AdminCatalogueItemRpcArgs,
+  AdminIdentifierRpcArgs,
+  AdminServiceContextRpcArgs,
+  ProviderReadinessRpcArgs,
 } from "@/lib/supabase/types.domain";
 
 type RpcClient = SupabaseClient;
@@ -199,6 +202,12 @@ export const cmdAdminCreateServiceReadyShift = (client: RpcClient, args: AdminCr
 export const cmdAdminRevealParticipantNdisIdentifier = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_reveal_participant_ndis_identifier", args);
 
+export const cmdAdminSetParticipantNdisIdentifier = (client: RpcClient, args: AdminIdentifierRpcArgs) =>
+  adminRpc(client, "cmd_admin_set_ndis_identifier", args as unknown as Record<string, unknown>);
+
+export const cmdAdminCreateServiceContext = (client: RpcClient, args: AdminServiceContextRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_service_context", args as unknown as Record<string, unknown>);
+
 export const cmdAdminCreateProviderScopeVersion = (client: RpcClient, args: AdminProviderScopeRpcArgs) =>
   adminRpc(client, "cmd_admin_create_provider_scope_version", args as unknown as Record<string, unknown>);
 
@@ -231,3 +240,15 @@ export const cmdAdminUpdateServiceContextState = (client: RpcClient, args: Recor
 
 export const cmdAdminRecordAcknowledgement = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_record_acknowledgement", args);
+
+export async function listAdminProviderReadiness(client: RpcClient, args: ProviderReadinessRpcArgs): Promise<Record<string, unknown>> {
+  const { data, error } = await client.rpc("list_admin_provider_readiness", args);
+  if (error) throw error;
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function listAdminAcknowledgementLedger(client: RpcClient, organisationId: string, shiftId: string | null): Promise<Array<Record<string, unknown>>> {
+  const { data, error } = await client.rpc("list_admin_acknowledgement_ledger", { p_organisation_id: organisationId, p_shift_id: shiftId });
+  if (error) throw error;
+  return (data ?? []) as Array<Record<string, unknown>>;
+}

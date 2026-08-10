@@ -39,7 +39,9 @@ export type ShiftState =
   | "needs_review"
   | "cancelled"
   | "cancelled_needs_review"
-  | "corrected";
+  | "corrected"
+  | "legacy_incomplete"
+  | "urgent_provider_review";
 
 export type CommandType =
   | "on_my_way"
@@ -581,12 +583,57 @@ export interface AdminCatalogueItemRpcArgs {
   p_payload: Record<string, unknown>;
 }
 
+export interface AdminIdentifierRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_participant_id: UUID;
+  p_identifier: string;
+  p_payload: Record<string, unknown>;
+}
+
+export interface AdminServiceContextRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_participant_id: UUID;
+  p_capability_id: UUID;
+  p_catalogue_item_id: UUID;
+  p_role_version_id: UUID;
+  p_jurisdiction: string;
+  p_external_agreement_reference: string;
+  p_plan_reference: string | null;
+  p_source_type: string;
+  p_owner_profile_id: UUID;
+  p_reviewer_profile_id: UUID | null;
+  p_effective_from: IsoTimestamp;
+  p_effective_until: IsoTimestamp;
+  p_goal_source: string;
+  p_goal_reference: string;
+  p_goal_display: string;
+  p_lifecycle_state: "draft" | "active" | "review_required";
+  p_screening_required: boolean;
+  p_screening_decision_issuer: string | null;
+  p_screening_decision_authority: string | null;
+  p_screening_evidence_reference: string | null;
+  p_payload: Record<string, unknown>;
+}
+
+export interface ProviderReadinessRpcArgs {
+  p_organisation_id: UUID;
+  p_worker_membership_id: UUID;
+  p_participant_id: UUID;
+  p_context_id: UUID;
+  p_scheduled_start: IsoTimestamp;
+  p_scheduled_end: IsoTimestamp;
+}
+
 export interface ParticipantServiceContextVersion {
   id: UUID;
   organisation_id: UUID;
   participant_id: UUID;
   capability_id: UUID;
   catalogue_item_id: UUID;
+  role_version_id: UUID | null;
+  jurisdiction: string | null;
   external_agreement_reference: string;
   plan_reference: string | null;
   source_type: string;

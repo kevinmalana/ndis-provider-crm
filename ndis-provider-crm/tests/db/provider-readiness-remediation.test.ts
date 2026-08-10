@@ -26,7 +26,7 @@ describe("05b hardening invariants", () => {
 
   it("blocks a context whose recorded jurisdiction is outside current scope", async () => {
     await ex.execAsService(`update public.participant_service_context_versions set jurisdiction='QLD' where id='${fx.contextId}'`);
-    const result = await ex.execAsService(`select public.provider_readiness('${fx.orgId}', (select membership_id from public.shift_assignments where shift_id='${fx.shiftId}' and withdrawn_at is null limit 1), '${fx.contextId}', '2026-08-07T10:00:00Z', '2026-08-07T11:00:00Z') as readiness`);
+    const result = await ex.execAsService(`select public.provider_readiness('${fx.orgId}', (select membership_id from public.shift_assignments where shift_id='${fx.shiftId}' and withdrawn_at is null limit 1), '${fx.participantId}', '${fx.contextId}', '2026-08-07T10:00:00Z', '2026-08-07T11:00:00Z') as readiness`);
     expect(result.rows[0]).toMatchObject({ readiness: { ready: false, reason: "jurisdiction_mismatch" } });
   });
 
@@ -49,7 +49,7 @@ describe("05b hardening invariants", () => {
     ex.setUser(fx.adminUid);
     const root = await ex.callRpc("cmd_admin_record_acknowledgement", { command_id: "ack-root-stale", organisation_id: fx.orgId, shift_id: fx.shiftId, event_class: "conclusive", event_type: "external_signed_evidence", reported_signer_profile_id: fx.participantUid, authority_type: "participant_self", method: "external_signed", occurred_at: "2026-08-07T09:00:00Z", external_evidence_reference: "SYN-ACK-ROOT", payload: {} });
     const rootId = (root as { event_id: string }).event_id;
-    await ex.callRpc("cmd_admin_record_acknowledgement", { command_id: "ack-next-stale", organisation_id: fx.orgId, shift_id: fx.shiftId, event_class: "conclusive", event_type: "external_decline_evidence", reported_signer_profile_id: fx.participantUid, authority_type: "participant_self", method: "external_decline", occurred_at: "2026-08-07T09:01:00Z", external_evidence_reference: "SYN-ACK-NEXT", expected_current_event_id: rootId, payload: {} });
+    await ex.callRpc("cmd_admin_record_acknowledgement", { command_id: "ack-next-stale", organisation_id: fx.orgId, shift_id: fx.shiftId, event_class: "conclusive", event_type: "external_decline_evidence", reported_signer_profile_id: fx.participantUid, authority_type: "participant_self", method: "external_decline", occurred_at: "2026-08-07T09:01:00Z", reason: "Correct the original signed outcome", external_evidence_reference: "SYN-ACK-NEXT", expected_current_event_id: rootId, payload: {} });
     const stale = await ex.callRpc("cmd_admin_record_acknowledgement", { command_id: "ack-conflict", organisation_id: fx.orgId, shift_id: fx.shiftId, event_class: "conclusive", event_type: "external_signed_evidence", reported_signer_profile_id: fx.participantUid, authority_type: "participant_self", method: "external_signed", occurred_at: "2026-08-07T09:02:00Z", external_evidence_reference: "SYN-ACK-CONFLICT", expected_current_event_id: rootId, payload: {} });
     expect(stale).toMatchObject({ status: "conflict_preserved" });
     const leaves = await ex.execAsService(`select count(*)::int as c from public.service_acknowledgement_current where shift_id='${fx.shiftId}'`);
