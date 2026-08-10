@@ -246,6 +246,21 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "reason", type: "text" }, { name: "external_evidence_reference", type: "text" }, { name: "expected_current_event_id", type: "uuid" }, { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_admin_create_provider_scope_version: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "registration_state", type: "text" }, { name: "registration_group", type: "text" }, { name: "class_of_support", type: "text" }, { name: "jurisdictions", type: "text[]" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "reviewed_by", type: "uuid" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_support_capability: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "scope_version_id", type: "uuid" }, { name: "support_category", type: "text" }, { name: "service_kind", type: "text" }, { name: "capability", type: "text" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_catalogue_item: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "source_label", type: "text" }, { name: "source_version", type: "text" }, { name: "catalogue_effective_from", type: "timestamptz" }, { name: "catalogue_effective_until", type: "timestamptz" }, { name: "item_code", type: "text" }, { name: "item_name", type: "text" }, { name: "support_category", type: "text" }, { name: "time_unit", type: "text" }, { name: "service_kind", type: "text" }, { name: "item_effective_from", type: "timestamptz" }, { name: "item_effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_admin_create_grant: {
     params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "consent_id", type: "uuid" },

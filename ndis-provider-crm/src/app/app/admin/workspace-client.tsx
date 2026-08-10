@@ -771,10 +771,10 @@ function Readiness({
   const [registrationState, setRegistrationState] = useState("registered");
   const [jurisdictions, setJurisdictions] = useState("NSW");
   const [scope, setScope] = useState("");
-  const [capability, setCapability] = useState("");
-  const [catalogueItem, setCatalogueItem] = useState("");
   const [worker, setWorker] = useState("");
   const [role, setRole] = useState("");
+  const [roleTitle, setRoleTitle] = useState("");
+  const [pathwayReference, setPathwayReference] = useState("");
   const [verificationRef, setVerificationRef] = useState("");
   const [requirement, setRequirement] = useState("");
   const [evidenceRef, setEvidenceRef] = useState("");
@@ -788,8 +788,6 @@ function Readiness({
   const selectedShift = data.shifts.find((s) => String(s.id) === shift);
   const selectedContext = data.serviceContexts?.find((c) => String(c.id) === context);
   const selectedScope = data.providerScopes?.[0];
-  const selectedCapability = data.capabilities?.[0];
-  const selectedCatalogueItem = data.catalogueItems?.[0];
   const inputBase = "h-9 w-full rounded-md border bg-background px-2";
   const message = (key: FormKey) => formError(key) ? <p role="status" className="text-xs text-info-foreground">{formError(key)}</p> : null;
   return (
@@ -827,6 +825,17 @@ function Readiness({
             <Button type="submit" disabled={isPending(FORM_KEYS.competenceEvidence)} aria-busy={isPending(FORM_KEYS.competenceEvidence)}>Record competence evidence</Button>{message(FORM_KEYS.competenceEvidence)}
           </form>
           <div className="border-t pt-4 text-xs text-muted-foreground"><strong>Screening policy:</strong> registered risk-assessed roles are always required; registered non-risk roles follow the registration baseline unless provider policy is stricter; unregistered roles require an explicit effective provider decision. There is no generic override.</div>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.workerVerification, "cmd_admin_create_risk_role", { p_organisation_id: organisationId, p_title: roleTitle, p_definition_basis: "Provider risk assessment", p_description: "Synthetic role definition", p_assessed_at: new Date().toISOString(), p_assessor_name: "Synthetic Admin", p_assessor_title: "Provider Admin", p_risk_assessed: true, p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Risk-assessed role title"><Input required value={roleTitle} onChange={(e) => setRoleTitle(e.target.value)} placeholder="Synthetic support worker" /></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.workerVerification)} aria-busy={isPending(FORM_KEYS.workerVerification)} variant="outline">Define risk-assessed role</Button>
+          </form>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.workerVerification, "cmd_admin_create_screening_policy", { p_organisation_id: organisationId, p_role_version_id: role, p_registration_state: registrationState, p_decision: "required", p_decision_owner: "Synthetic Admin", p_decision_reason: "Provider readiness policy", p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Button type="submit" disabled={isPending(FORM_KEYS.workerVerification)} aria-busy={isPending(FORM_KEYS.workerVerification)} variant="outline">Save registered/unregistered screening policy</Button>
+          </form>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.workerVerification, "cmd_admin_record_worker_pathway", { p_organisation_id: organisationId, p_worker_membership_id: worker, p_role_version_id: role, p_pathway: "working_on_application", p_jurisdiction: "NSW", p_application_placement_contract_reference: pathwayReference, p_pathway_start: new Date().toISOString(), p_pathway_end: new Date(Date.now() + 86400000).toISOString(), p_supervisor_membership_id: worker, p_supervisor_clearance_reference: "SYN-SUPERVISOR-CLEAR", p_risk_management_plan_reference: "SYN-RISK-PLAN", p_administering_organisation: null, p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Named pathway application/placement/contract reference"><Input required value={pathwayReference} onChange={(e) => setPathwayReference(e.target.value)} placeholder="SYN-APPLICATION-001" /></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.workerVerification)} aria-busy={isPending(FORM_KEYS.workerVerification)} variant="outline">Record named pathway evidence</Button>
+          </form>
         </CardContent></Card>
         <Card><CardHeader><CardTitle>6–10. Context, shift snapshot and acknowledgement</CardTitle><CardDescription>Only active, reviewed, current contexts schedule. Snapshot fields are immutable; acknowledgement is provider-recorded and never proof of participant authentication, consent or payment.</CardDescription></CardHeader><CardContent className="space-y-4">
           <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.contextState, "cmd_admin_update_service_context_state", { p_organisation_id: organisationId, p_context_id: context, p_lifecycle_state: contextState, p_reviewer_profile_id: null, p_reason: "Admin readiness review", p_payload: { source: "admin-readiness" } }); }}>

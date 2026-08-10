@@ -193,10 +193,8 @@ export const cmdAdminRevokeGrant = (client: RpcClient, args: Record<string, unkn
 export const cmdAdminSetAvailability = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_set_availability", args);
 
-export const cmdAdminCreateShift = (client: RpcClient, args: AdminCreateShiftRpcArgs) =>
+export const cmdAdminCreateServiceReadyShift = (client: RpcClient, args: AdminCreateShiftRpcArgs) =>
   adminRpc(client, "cmd_admin_create_service_ready_shift", args as unknown as Record<string, unknown>);
-
-export const cmdAdminCreateServiceReadyShift = cmdAdminCreateShift;
 
 export const cmdAdminRevealParticipantNdisIdentifier = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_reveal_participant_ndis_identifier", args);
@@ -212,6 +210,18 @@ export const cmdAdminCreateCatalogueItem = (client: RpcClient, args: AdminCatalo
 
 export const cmdAdminRecordWorkerVerification = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_record_worker_verification", args);
+
+export const cmdAdminCreateRiskRole = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_create_risk_role", args);
+
+export const cmdAdminCreateScreeningPolicy = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_create_screening_policy", args);
+
+export const cmdAdminCreateCompetenceRequirement = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_create_competence_requirement", args);
+
+export const cmdAdminRecordWorkerPathway = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_record_worker_pathway", args);
 
 export const cmdAdminRecordCompetenceEvidence = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_record_competence_evidence", args);
