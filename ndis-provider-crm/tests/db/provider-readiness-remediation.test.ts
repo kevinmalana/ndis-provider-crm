@@ -24,6 +24,12 @@ describe("05b hardening invariants", () => {
     expect(counts.rows[0]).toMatchObject({ snapshots: 1 });
   });
 
+  it("blocks a context whose recorded jurisdiction is outside current scope", async () => {
+    await ex.execAsService(`update public.participant_service_context_versions set jurisdiction='QLD' where id='${fx.contextId}'`);
+    const result = await ex.execAsService(`select public.provider_readiness('${fx.orgId}', (select membership_id from public.shift_assignments where shift_id='${fx.shiftId}' and withdrawn_at is null limit 1), '${fx.contextId}', '2026-08-07T10:00:00Z', '2026-08-07T11:00:00Z') as readiness`);
+    expect(result.rows[0]).toMatchObject({ readiness: { ready: false, reason: "jurisdiction_mismatch" } });
+  });
+
   it("keeps attempts separate and resolves an immutable conclusive chain", async () => {
     ex.setUser(fx.schedulerUid);
     const attempt = await ex.callRpc("cmd_admin_record_acknowledgement", { command_id: "ack-attempt", organisation_id: fx.orgId, shift_id: fx.shiftId, event_class: "attempt", event_type: "unavailable_attempt", occurred_at: "2026-08-07T08:59:00Z", reason: "Signer unavailable", payload: {} });

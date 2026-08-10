@@ -169,6 +169,7 @@ create table if not exists public.participant_service_context_versions (
   screening_required_by_participant boolean not null default false, screening_decision_issuer text, screening_decision_authority text, screening_evidence_reference text,
   superseded_by uuid references public.participant_service_context_versions(id), created_at timestamptz not null default pg_catalog.now(), check (effective_until > effective_from)
 );
+alter table public.participant_service_context_versions add column if not exists jurisdiction text;
 create table if not exists public.shift_service_snapshots (
   id uuid primary key default pg_catalog.gen_random_uuid(), organisation_id uuid not null references public.organisations(id), shift_id uuid not null unique references public.shifts(id) on delete cascade, service_context_id uuid not null references public.participant_service_context_versions(id), capability_id uuid not null references public.organisation_support_capabilities(id), catalogue_item_id uuid not null references public.provider_support_items(id), catalogue_version_id uuid not null references public.provider_support_catalogue_versions(id), item_code text not null, item_name text not null, support_category text not null, service_kind text not null, time_unit text not null, goal_reference text not null, goal_display text not null, scheduled_start timestamptz not null, scheduled_end timestamptz not null, created_at timestamptz not null default pg_catalog.now()
 );
@@ -601,6 +602,7 @@ begin
   if cap.id is null or cap.status<>'active' or cap.capability<>'individual_time_supported' or cap.effective_from>p_start or coalesce(cap.effective_until,p_end)>=p_start and cap.effective_until<p_end then return pg_catalog.jsonb_build_object('ready',false,'reason','capability_not_supported'); end if;
   select * into scope from public.organisation_provider_scope_versions where id=cap.scope_version_id and organisation_id=p_organisation_id for update;
   if scope.id is null or scope.status<>'active' or scope.effective_from>p_start or (scope.effective_until is not null and scope.effective_until<p_end) then return pg_catalog.jsonb_build_object('ready',false,'reason','provider_scope_not_current'); end if;
+  if nullif(pg_catalog.btrim(c.jurisdiction),'') is not null and not (c.jurisdiction=any(scope.jurisdictions)) then return pg_catalog.jsonb_build_object('ready',false,'reason','jurisdiction_mismatch'); end if;
   select * into item from public.provider_support_items where id=c.catalogue_item_id and organisation_id=p_organisation_id for update;
   if item.id is null or item.status<>'active' or item.time_unit not in ('hour','minute') or item.service_kind<>cap.service_kind or item.support_category<>cap.support_category or item.effective_from>p_start or (item.effective_until is not null and item.effective_until<p_end) then return pg_catalog.jsonb_build_object('ready',false,'reason','catalogue_mismatch'); end if;
   select * into m from public.organisation_memberships where id=p_worker_membership_id and organisation_id=p_organisation_id and role='worker' for update;
