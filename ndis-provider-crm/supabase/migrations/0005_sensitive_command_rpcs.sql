@@ -1331,10 +1331,7 @@ begin
     from public.organisation_memberships m
     where m.id = p_new_worker_membership
       and m.organisation_id = v_shift.organisation_id
-      and m.role = 'worker'
-      and m.status = 'active'
-      and m.effective_from <= now()
-      and (m.effective_until is null or m.effective_until > now())
+      and public.membership_has_role(m.id, 'worker')
   ) then
     raise exception 'invalid_target_worker' using errcode = 'P0001';
   end if;

@@ -188,6 +188,35 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "critical_content", type: "text" }, { name: "review_due_at", type: "timestamptz" }, { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_admin_update_critical_info: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "participant_id", type: "uuid" }, { name: "critical_content", type: "text" },
+      { name: "review_due_at", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_invite: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "email", type: "text" }, { name: "role", type: "text" },
+      { name: "expires_at", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_link_participant: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "participant_id", type: "uuid" }, { name: "profile_id", type: "uuid" },
+      { name: "evidence_reference", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_set_authority: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
+      { name: "representative_profile_id", type: "uuid" }, { name: "authority_type", type: "text" }, { name: "scope_categories", type: "text[]" },
+      { name: "evidence_reference", type: "text" }, { name: "issuer", type: "text" }, { name: "effective_from", type: "timestamptz" },
+      { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_admin_create_shift: {
     params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
@@ -198,10 +227,29 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
   },
   cmd_admin_create_grant: {
     params: [
-      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
-      { name: "recipient_profile_id", type: "uuid" }, { name: "purpose", type: "text" }, { name: "scope_categories", type: "text[]" },
-      { name: "consent_basis", type: "text" }, { name: "consent_reference", type: "text" }, { name: "evidence_reference", type: "text" },
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "consent_id", type: "uuid" },
       { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_record_consent: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
+      { name: "recipient_profile_id", type: "uuid" }, { name: "authorising_profile_id", type: "uuid" }, { name: "purpose", type: "text" },
+      { name: "scope_categories", type: "text[]" }, { name: "consent_basis", type: "text" }, { name: "representative_authority_id", type: "uuid" },
+      { name: "evidence_reference", type: "text" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_revoke_grant: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "grant_id", type: "uuid" },
+      { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_set_availability: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "worker_membership", type: "uuid" },
+      { name: "available_from", type: "timestamptz" }, { name: "available_until", type: "timestamptz" },
+      { name: "note", type: "text" }, { name: "payload", type: "jsonb" },
     ],
   },
   cmd_accept_invitation: {

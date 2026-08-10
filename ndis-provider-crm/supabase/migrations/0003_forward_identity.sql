@@ -492,7 +492,18 @@ stable
 security definer
 set search_path = public
 as $$
-  select m.role
+  select coalesce(
+    (
+      select r.role
+      from public.organisation_membership_roles r
+      where r.membership_id = m.id
+        and r.status = 'active'
+        and r.effective_from <= now()
+        and (r.effective_until is null or r.effective_until > now())
+      order by case r.role when 'admin' then 1 when 'scheduler' then 2 else 3 end
+      limit 1
+    ), m.role
+  )
   from public.organisation_memberships m
   join public.active_organisation_context a on a.profile_id = m.profile_id
   join public.organisations o on o.id = m.organisation_id
@@ -537,16 +548,19 @@ set search_path = public
 as $$
   select exists (
     select 1
-    from public.organisation_membership_roles r
-    join public.organisation_memberships m on m.id = r.membership_id
-    where r.membership_id = p_membership_id
-      and r.role = p_role
+    from public.organisation_memberships m
+    left join public.organisation_membership_roles r
+      on r.membership_id = m.id and r.role = p_role
       and r.status = 'active'
       and r.effective_from <= now()
       and (r.effective_until is null or r.effective_until > now())
+    where m.id = p_membership_id
       and m.status = 'active'
       and m.effective_from <= now()
       and (m.effective_until is null or m.effective_until > now())
+      and (r.id is not null or not exists (
+        select 1 from public.organisation_membership_roles r2 where r2.membership_id = m.id
+      ) and m.role = p_role)
   )
 $$;
 

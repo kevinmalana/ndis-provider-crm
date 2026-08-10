@@ -101,6 +101,9 @@ export async function loadMembershipContext(): Promise<MembershipContext> {
         .is("deleted_at", null)
         .maybeSingle<Pick<Organisation, "id" | "name">>()
     : { data: null };
+  const { data: effectiveRole } = activeContext
+    ? await supabase.rpc("current_user_membership_role")
+    : { data: null };
 
   const typed = memberships as unknown as Array<
     Pick<
@@ -127,7 +130,7 @@ export async function loadMembershipContext(): Promise<MembershipContext> {
         return {
           organisation_id: activeOrg.id,
           organisation_name: activeOrg.name,
-          role: match.role,
+          role: (effectiveRole as OrganisationRole | null) ?? match.role,
         };
       })()
     : null;

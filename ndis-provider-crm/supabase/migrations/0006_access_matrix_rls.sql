@@ -104,6 +104,12 @@ as $$
   from public.external_disclosure_grants g
   join public.organisations o on o.id = g.organisation_id
   where g.recipient_profile_id = auth.uid()
+    and exists (
+      select 1 from public.organisation_memberships m
+      where m.organisation_id = g.organisation_id
+        and m.profile_id = auth.uid()
+        and public.membership_has_role(m.id, 'external')
+    )
     and g.status = 'active'
     and g.effective_from <= now()
     and g.effective_until > now()
@@ -241,6 +247,12 @@ create policy external_grants_select_recipient
     recipient_profile_id = auth.uid()
     and status = 'active'
     and effective_until > now()
+    and exists (
+      select 1 from public.organisation_memberships m
+      where m.organisation_id = public.external_disclosure_grants.organisation_id
+        and m.profile_id = auth.uid()
+        and public.membership_has_role(m.id, 'external')
+    )
   );
 
 drop policy if exists external_grants_select_participant_self on public.external_disclosure_grants;
