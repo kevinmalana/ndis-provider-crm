@@ -55,6 +55,7 @@ create table if not exists public.participant_consent_evidence (
   evidence_reference text not null,
   effective_from timestamptz not null,
   effective_until timestamptz not null,
+  version integer not null default 1 check (version > 0),
   status text not null default 'active' check (status in ('active','superseded','revoked','expired')),
   superseded_by uuid references public.participant_consent_evidence(id) on delete set null,
   representative_authority_id uuid references public.representative_authorities(id) on delete restrict,
@@ -73,7 +74,8 @@ create table if not exists public.participant_consent_evidence (
   constraint participant_consent_recipient_tenant foreign key (organisation_id, recipient_profile_id)
     references public.organisation_memberships(organisation_id, profile_id) on delete restrict,
   constraint participant_consent_authoriser_tenant foreign key (organisation_id, authorising_profile_id)
-    references public.organisation_memberships(organisation_id, profile_id) on delete restrict
+    references public.organisation_memberships(organisation_id, profile_id) on delete restrict,
+  constraint participant_consent_version_unique unique (organisation_id, participant_id, recipient_profile_id, version)
 );
 create index if not exists participant_consent_lookup_idx
   on public.participant_consent_evidence(organisation_id, participant_id, status, effective_until);
