@@ -231,9 +231,10 @@ revoke all on function public.provider_readiness(uuid,uuid,uuid,uuid,timestamptz
 
 create or replace function public.cmd_admin_create_service_ready_shift(p_command_id text,p_organisation_id uuid,p_participant_id uuid,p_worker_membership uuid,p_service_context_id uuid,p_scheduled_start timestamptz,p_scheduled_end timestamptz,p_reason text,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; reserved record; ready jsonb; s public.shifts%rowtype; a public.shift_assignments%rowtype; c public.participant_service_context_versions%rowtype; i public.provider_support_items%rowtype; cap public.organisation_support_capabilities%rowtype; cv public.provider_support_catalogue_versions%rowtype; snap public.shift_service_snapshots%rowtype; out jsonb;
+declare actor uuid; reserved record; ready jsonb; s public.shifts%rowtype; a public.shift_assignments%rowtype; c public.participant_service_context_versions%rowtype; i public.provider_support_items%rowtype; cap public.organisation_support_capabilities%rowtype; cv public.provider_support_catalogue_versions%rowtype; snap public.shift_service_snapshots%rowtype; out jsonb; retry jsonb;
 begin
   actor := public.admin_context(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_create_service_ready_shift',p_organisation_id); if retry is not null then return retry; end if;
   if p_scheduled_end <= p_scheduled_start then raise exception 'shift_dates_invalid'; end if;
   select * into reserved from public.reserve_admin_command(p_command_id,'admin_create_service_ready_shift',p_organisation_id,p_payload);
   if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
@@ -259,10 +260,11 @@ grant execute on function public.cmd_admin_create_service_ready_shift(text,uuid,
 
 create or replace function public.cmd_admin_reveal_participant_ndis_identifier(p_command_id text,p_organisation_id uuid,p_participant_id uuid,p_reason text,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; reserved record; value text; out jsonb;
+declare actor uuid; reserved record; value text; out jsonb; retry jsonb;
 begin
   actor := public.current_membership(p_organisation_id);
   if actor is null or not public.membership_has_role(actor,'admin') then raise exception 'admin_required' using errcode='42501'; end if;
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_identifier',p_organisation_id); if retry is not null then return retry; end if;
   if nullif(pg_catalog.btrim(p_reason),'') is null then raise exception 'reveal_reason_required'; end if;
   select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,p_payload);
   if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
@@ -336,9 +338,10 @@ grant select on public.organisation_provider_scope_versions, public.organisation
 
 create or replace function public.cmd_admin_set_ndis_identifier(p_command_id text,p_organisation_id uuid,p_participant_id uuid,p_identifier text,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; reserved record; row_id uuid; out jsonb;
+declare actor uuid; reserved record; row_id uuid; out jsonb; retry jsonb;
 begin
   actor := public.current_membership(p_organisation_id); if actor is null or not public.membership_has_role(actor,'admin') then raise exception 'admin_required' using errcode='42501'; end if;
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_identifier',p_organisation_id); if retry is not null then return retry; end if;
   if nullif(pg_catalog.btrim(p_identifier),'') is null or p_identifier !~ '^[0-9]{9,12}$' then raise exception 'identifier_invalid'; end if;
   if not exists(select 1 from public.participants x where x.id=p_participant_id and x.organisation_id=p_organisation_id and x.archived_at is null) then raise exception 'participant_not_found'; end if;
   select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
@@ -360,9 +363,10 @@ grant execute on function public.list_admin_masked_participant_ndis_identifiers(
 
 create or replace function public.cmd_admin_create_service_context(p_command_id text,p_organisation_id uuid,p_participant_id uuid,p_capability_id uuid,p_catalogue_item_id uuid,p_role_version_id uuid,p_jurisdiction text,p_external_agreement_reference text,p_plan_reference text,p_source_type text,p_owner_profile_id uuid,p_reviewer_profile_id uuid,p_effective_from timestamptz,p_effective_until timestamptz,p_goal_source text,p_goal_reference text,p_goal_display text,p_lifecycle_state text,p_screening_required boolean,p_screening_decision_issuer text,p_screening_decision_authority text,p_screening_evidence_reference text,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; reserved record; row_id uuid; out jsonb; cap public.organisation_support_capabilities%rowtype; item public.provider_support_items%rowtype; catalogue public.provider_support_catalogue_versions%rowtype; scope public.organisation_provider_scope_versions%rowtype;
+declare actor uuid; reserved record; row_id uuid; out jsonb; cap public.organisation_support_capabilities%rowtype; item public.provider_support_items%rowtype; catalogue public.provider_support_catalogue_versions%rowtype; scope public.organisation_provider_scope_versions%rowtype; retry jsonb;
 begin
   actor := public.admin_context(p_organisation_id); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_service_context',p_organisation_id); if retry is not null then return retry; end if;
   if p_effective_until <= p_effective_from then raise exception 'context_dates_invalid'; end if; if p_lifecycle_state not in ('draft','active','review_required') then raise exception 'context_lifecycle_invalid'; end if;
   if nullif(pg_catalog.btrim(p_jurisdiction),'') is null or nullif(pg_catalog.btrim(p_external_agreement_reference),'') is null or nullif(pg_catalog.btrim(p_source_type),'') is null or nullif(pg_catalog.btrim(p_goal_source),'') is null or nullif(pg_catalog.btrim(p_goal_reference),'') is null or nullif(pg_catalog.btrim(p_goal_display),'') is null then raise exception 'context_fields_required'; end if;
   if p_screening_required and (nullif(pg_catalog.btrim(p_screening_decision_issuer),'') is null or nullif(pg_catalog.btrim(p_screening_decision_authority),'') is null or nullif(pg_catalog.btrim(p_screening_evidence_reference),'') is null) then raise exception 'context_screening_decision_incomplete'; end if;
@@ -374,8 +378,8 @@ begin
   if cap.id is null or item.id is null or catalogue.id is null or scope.id is null or item.support_category<>cap.support_category or item.service_kind<>cap.service_kind or not (pg_catalog.btrim(p_jurisdiction)=any(scope.jurisdictions)) then raise exception 'context_service_binding_invalid'; end if;
   if p_effective_from<cap.effective_from or (cap.effective_until is not null and p_effective_until>cap.effective_until) or p_effective_from<item.effective_from or (item.effective_until is not null and p_effective_until>item.effective_until) or p_effective_from<catalogue.effective_from or (catalogue.effective_until is not null and p_effective_until>catalogue.effective_until) or p_effective_from<scope.effective_from or (scope.effective_until is not null and p_effective_until>scope.effective_until) then raise exception 'context_interval_outside_service_configuration'; end if;
   if not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active' and x.effective_from<=p_effective_from and (x.effective_until is null or x.effective_until>=p_effective_until)) then raise exception 'context_role_invalid'; end if;
-  if not exists(select 1 from public.organisation_memberships x where x.organisation_id=p_organisation_id and x.profile_id=p_owner_profile_id and x.status='active' and x.role in ('admin','scheduler')) then raise exception 'context_owner_invalid'; end if;
-  if p_reviewer_profile_id is not null and not exists(select 1 from public.organisation_memberships x where x.organisation_id=p_organisation_id and x.profile_id=p_reviewer_profile_id and x.status='active' and x.role in ('admin','scheduler')) then raise exception 'context_reviewer_invalid'; end if;
+  if not exists(select 1 from public.organisation_memberships x where x.organisation_id=p_organisation_id and x.profile_id=p_owner_profile_id and (public.membership_has_role(x.id,'admin') or public.membership_has_role(x.id,'scheduler'))) then raise exception 'context_owner_invalid'; end if;
+  if p_reviewer_profile_id is not null and not exists(select 1 from public.organisation_memberships x where x.organisation_id=p_organisation_id and x.profile_id=p_reviewer_profile_id and (public.membership_has_role(x.id,'admin') or public.membership_has_role(x.id,'scheduler'))) then raise exception 'context_reviewer_invalid'; end if;
   if p_lifecycle_state='active' and p_reviewer_profile_id is null then raise exception 'reviewed_context_required'; end if;
   select * into reserved from public.reserve_admin_command(p_command_id,'admin_service_context',p_organisation_id,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   insert into public.participant_service_context_versions(organisation_id,participant_id,capability_id,catalogue_item_id,role_version_id,jurisdiction,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state,screening_required_by_participant,screening_decision_issuer,screening_decision_authority,screening_evidence_reference) values(p_organisation_id,p_participant_id,p_capability_id,p_catalogue_item_id,p_role_version_id,pg_catalog.btrim(p_jurisdiction),pg_catalog.btrim(p_external_agreement_reference),nullif(pg_catalog.btrim(p_plan_reference),''),pg_catalog.btrim(p_source_type),p_owner_profile_id,p_reviewer_profile_id,p_effective_from,p_effective_until,pg_catalog.btrim(p_goal_source),pg_catalog.btrim(p_goal_reference),pg_catalog.btrim(p_goal_display),p_lifecycle_state,p_screening_required,p_screening_decision_issuer,p_screening_decision_authority,p_screening_evidence_reference) returning id into row_id;
@@ -602,8 +606,12 @@ end $$;
 
 create or replace function public.mark_05b_urgent_provider_review()
 returns trigger language plpgsql security definer set search_path = '' as $$
-declare org_id uuid := coalesce(nullif(pg_catalog.to_jsonb(new)->>'organisation_id','')::uuid,nullif(pg_catalog.to_jsonb(old)->>'organisation_id','')::uuid);
+declare org_id uuid := coalesce(nullif(pg_catalog.to_jsonb(new)->>'organisation_id','')::uuid,nullif(pg_catalog.to_jsonb(old)->>'organisation_id','')::uuid); membership_id uuid;
 begin
+  if org_id is null and tg_table_name='organisation_membership_roles' then
+    membership_id:=coalesce(nullif(pg_catalog.to_jsonb(new)->>'membership_id','')::uuid,nullif(pg_catalog.to_jsonb(old)->>'membership_id','')::uuid);
+    select organisation_id into org_id from public.organisation_memberships where id=membership_id;
+  end if;
   perform public.lock_05b_readiness(org_id);
   update public.shifts s
   set state='urgent_provider_review', version=s.version+1
@@ -621,7 +629,7 @@ end $$;
 revoke all on function public.mark_05b_urgent_provider_review() from public;
 revoke all on function public.mark_05b_urgent_provider_review() from anon;
 do $$ declare t text; begin
-  foreach t in array array['organisation_provider_scope_versions','organisation_support_capabilities','provider_support_catalogue_versions','provider_support_items','role_screening_policy_versions','worker_screening_verification_versions','worker_screening_pathway_versions','role_competence_requirements','worker_competence_evidence_versions','participant_service_context_versions'] loop
+  foreach t in array array['organisation_provider_scope_versions','organisation_support_capabilities','provider_support_catalogue_versions','provider_support_items','risk_assessed_role_versions','role_screening_policy_versions','worker_screening_verification_versions','worker_screening_pathway_versions','role_competence_requirements','worker_competence_evidence_versions','participant_service_context_versions','organisation_membership_roles'] loop
     execute format('drop trigger if exists %I on public.%I', '05b_urgent_'||t, t);
     execute format('create trigger %I after insert or update or delete on public.%I for each row execute function public.mark_05b_urgent_provider_review()', '05b_urgent_'||t, t);
   end loop;
@@ -629,17 +637,42 @@ end $$;
 drop trigger if exists ticket05b_urgent_organisation_memberships on public.organisation_memberships;
 create trigger ticket05b_urgent_organisation_memberships after update on public.organisation_memberships for each row execute function public.mark_05b_urgent_provider_review();
 
+create or replace function public.lock_05b_membership_role_change()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare org_id uuid; membership_id uuid:=coalesce(new.membership_id,old.membership_id);
+begin
+  select organisation_id into org_id from public.organisation_memberships where id=membership_id;
+  perform public.lock_05b_readiness(org_id);
+  if tg_op='DELETE' then return old; end if;
+  return new;
+end $$;
+revoke all on function public.lock_05b_membership_role_change() from public;
+revoke all on function public.lock_05b_membership_role_change() from anon;
+drop trigger if exists ticket05b_lock_membership_roles on public.organisation_membership_roles;
+create trigger ticket05b_lock_membership_roles before insert or update or delete on public.organisation_membership_roles for each row execute function public.lock_05b_membership_role_change();
+
+create or replace function public.assert_worker_assignment(p_shift_id uuid,p_organisation_id uuid)
+returns uuid language plpgsql stable security definer set search_path = '' as $$
+declare membership_id uuid;
+begin
+  select m.id into membership_id from public.organisation_memberships m join public.shift_assignments a on a.membership_id=m.id
+  where a.shift_id=p_shift_id and a.withdrawn_at is null and a.effective_from<=pg_catalog.now() and (a.effective_until is null or a.effective_until>pg_catalog.now())
+    and m.profile_id=auth.uid() and m.organisation_id=p_organisation_id and public.membership_has_role(m.id,'worker') limit 1;
+  if membership_id is null then raise exception 'not_assigned' using errcode='42501'; end if;
+  return membership_id;
+end $$;
+revoke all on function public.assert_worker_assignment(uuid,uuid) from public;
+
 -- Replace the organisation-wide/latest-role heuristic with an interval-bound,
 -- worker-role-bound predicate.  It is volatile because it locks all evidence
 -- used by a command; create/reassign/Start therefore cannot use stale rows.
 create or replace function public.provider_readiness(p_organisation_id uuid, p_worker_membership_id uuid, p_participant_id uuid, p_context_id uuid, p_start timestamptz, p_end timestamptz)
 returns jsonb language plpgsql volatile security definer set search_path = '' as $$
-declare c public.participant_service_context_versions%rowtype; cap public.organisation_support_capabilities%rowtype; item public.provider_support_items%rowtype; catalogue public.provider_support_catalogue_versions%rowtype; scope public.organisation_provider_scope_versions%rowtype; m public.organisation_memberships%rowtype; caller_membership uuid; caller_role text; role_row public.risk_assessed_role_versions%rowtype; registered boolean; required_screening boolean; policy_exists boolean; direct_ok boolean:=false; pathway_ok boolean:=false; bad_screening boolean; missing_competence boolean;
+declare c public.participant_service_context_versions%rowtype; cap public.organisation_support_capabilities%rowtype; item public.provider_support_items%rowtype; catalogue public.provider_support_catalogue_versions%rowtype; scope public.organisation_provider_scope_versions%rowtype; m public.organisation_memberships%rowtype; caller_membership uuid; role_row public.risk_assessed_role_versions%rowtype; registered boolean; required_screening boolean; policy_exists boolean; direct_ok boolean:=false; pathway_ok boolean:=false; bad_screening boolean; missing_competence boolean; required_windows tstzmultirange; screening_coverage tstzmultirange;
 begin
   if p_end<=p_start then return pg_catalog.jsonb_build_object('ready',false,'reason','invalid_interval'); end if;
   caller_membership:=public.current_membership(p_organisation_id);
-  select role into caller_role from public.organisation_memberships where id=caller_membership;
-  if coalesce(auth.role(),'anon')<>'service_role' and (caller_membership is null or (caller_role not in ('admin','scheduler') and caller_membership<>p_worker_membership_id)) then raise exception 'readiness_not_authorised' using errcode='42501'; end if;
+  if coalesce(auth.role(),'anon')<>'service_role' and (caller_membership is null or (not public.membership_has_role(caller_membership,'admin') and not public.membership_has_role(caller_membership,'scheduler') and (caller_membership<>p_worker_membership_id or not public.membership_has_role(caller_membership,'worker')))) then raise exception 'readiness_not_authorised' using errcode='42501'; end if;
   perform public.lock_05b_readiness(p_organisation_id);
   select * into c from public.participant_service_context_versions where id=p_context_id and organisation_id=p_organisation_id and participant_id=p_participant_id for update;
   if c.id is null then return pg_catalog.jsonb_build_object('ready',false,'reason','participant_context_mismatch'); end if;
@@ -653,34 +686,55 @@ begin
   if item.id is null or item.status<>'active' or item.time_unit not in ('hour','minute') or item.service_kind<>cap.service_kind or item.support_category<>cap.support_category or item.effective_from>p_start or (item.effective_until is not null and item.effective_until<p_end) then return pg_catalog.jsonb_build_object('ready',false,'reason','catalogue_mismatch'); end if;
   select * into catalogue from public.provider_support_catalogue_versions where id=item.catalogue_version_id and organisation_id=p_organisation_id for update;
   if catalogue.id is null or catalogue.status<>'active' or catalogue.effective_from>p_start or (catalogue.effective_until is not null and catalogue.effective_until<p_end) or item.effective_from<catalogue.effective_from or (catalogue.effective_until is not null and (item.effective_until is null or item.effective_until>catalogue.effective_until)) then return pg_catalog.jsonb_build_object('ready',false,'reason','catalogue_version_not_current'); end if;
-  select * into m from public.organisation_memberships where id=p_worker_membership_id and organisation_id=p_organisation_id and role='worker' for update;
-  if m.id is null or m.status<>'active' or m.effective_from>p_start or (m.effective_until is not null and m.effective_until<p_end) then return pg_catalog.jsonb_build_object('ready',false,'reason','worker_membership_invalid'); end if;
+  select * into m from public.organisation_memberships where id=p_worker_membership_id and organisation_id=p_organisation_id for update;
+  if m.id is null or m.status<>'active' or not public.membership_has_role(m.id,'worker') or m.effective_from>p_start or (m.effective_until is not null and m.effective_until<p_end) then return pg_catalog.jsonb_build_object('ready',false,'reason','worker_membership_invalid'); end if;
   select * into role_row from public.risk_assessed_role_versions where id=c.role_version_id and organisation_id=p_organisation_id and status='active' and effective_from<=p_start and (effective_until is null or effective_until>=p_end) for update;
   if role_row.id is null then return pg_catalog.jsonb_build_object('ready',false,'reason','role_not_current'); end if;
   registered:=scope.registration_state='registered';
-  select exists(select 1 from public.role_screening_policy_versions q where q.organisation_id=p_organisation_id and q.role_version_id=role_row.id and q.registration_state=scope.registration_state and q.status='active' and q.effective_from<=p_start and (q.effective_until is null or q.effective_until>=p_end)) into policy_exists;
-  select exists(select 1 from public.role_screening_policy_versions q where q.organisation_id=p_organisation_id and q.role_version_id=role_row.id and q.registration_state=scope.registration_state and q.status='active' and q.decision='required' and q.effective_from<=p_start and (q.effective_until is null or q.effective_until>=p_end)) into required_screening;
+  select coalesce(pg_catalog.range_agg(pg_catalog.tstzrange(greatest(q.effective_from,p_start),least(coalesce(q.effective_until,p_end),p_end),'[)')) @> pg_catalog.tstzrange(p_start,p_end,'[)'),false) into policy_exists from public.role_screening_policy_versions q where q.organisation_id=p_organisation_id and q.role_version_id=role_row.id and q.registration_state=scope.registration_state and q.status='active' and q.effective_from<p_end and (q.effective_until is null or q.effective_until>p_start);
   if not registered and not policy_exists then return pg_catalog.jsonb_build_object('ready',false,'reason','unregistered_screening_policy_missing'); end if;
-  if role_row.risk_assessed and registered then required_screening:=true; end if;
-  if c.screening_required_by_participant then required_screening:=true; end if;
-  select exists(select 1 from public.worker_screening_verification_versions v where v.organisation_id=p_organisation_id and v.worker_membership_id=m.id and v.role_version_id=role_row.id and v.status='active' and v.clearance_status='current' and v.verified_at<=p_start and v.effective_from<=p_start and (v.effective_until is null or v.effective_until>=p_end) and (v.clearance_expires_at is null or v.clearance_expires_at>=p_end) and not(v.interim_bar or v.suspension or v.exclusion or v.revocation)) into direct_ok;
-  select exists(select 1 from public.worker_screening_pathway_versions w where w.organisation_id=p_organisation_id and w.worker_membership_id=m.id and w.role_version_id=role_row.id and w.status='active' and w.effective_from<=p_start and (w.effective_until is null or w.effective_until>=p_end) and w.pathway_start<=p_start and w.pathway_end>=p_end and nullif(pg_catalog.btrim(w.jurisdiction),'') is not null and w.jurisdiction=c.jurisdiction and w.jurisdiction=any(scope.jurisdictions) and nullif(pg_catalog.btrim(w.application_placement_contract_reference),'') is not null and nullif(pg_catalog.btrim(w.supervisor_clearance_reference),'') is not null and nullif(pg_catalog.btrim(w.risk_management_plan_reference),'') is not null and w.supervisor_membership_id is not null and w.supervisor_membership_id<>m.id and ((w.pathway in ('secondary_school_work_experience','working_on_application') and w.administering_organisation is null) or (w.pathway in ('higher_education_placement','contractor_administered') and nullif(pg_catalog.btrim(w.administering_organisation),'') is not null)) and exists(select 1 from public.organisation_memberships sm where sm.id=w.supervisor_membership_id and sm.organisation_id=p_organisation_id and sm.role in ('admin','scheduler','worker') and sm.status='active' and sm.effective_from<=p_start and (sm.effective_until is null or sm.effective_until>=p_end) and exists(select 1 from public.worker_screening_verification_versions sv where sv.organisation_id=p_organisation_id and sv.worker_membership_id=sm.id and sv.status='active' and sv.clearance_status='current' and sv.verified_at<=p_start and sv.effective_from<=p_start and (sv.effective_until is null or sv.effective_until>=p_end) and (sv.clearance_expires_at is null or sv.clearance_expires_at>=p_end) and not(sv.interim_bar or sv.suspension or sv.exclusion or sv.revocation)))) into pathway_ok;
+  if (role_row.risk_assessed and registered) or c.screening_required_by_participant then
+    required_windows:=pg_catalog.tstzmultirange(pg_catalog.tstzrange(p_start,p_end,'[)'));
+  else
+    select coalesce(pg_catalog.range_agg(pg_catalog.tstzrange(greatest(q.effective_from,p_start),least(coalesce(q.effective_until,p_end),p_end),'[)')),'{}'::pg_catalog.tstzmultirange) into required_windows
+    from public.role_screening_policy_versions q where q.organisation_id=p_organisation_id and q.role_version_id=role_row.id and q.registration_state=scope.registration_state and q.status='active' and q.decision='required' and q.effective_from<p_end and (q.effective_until is null or q.effective_until>p_start);
+  end if;
+  required_screening:=required_windows<>'{}'::pg_catalog.tstzmultirange;
+  select coalesce(pg_catalog.range_agg(x.coverage),'{}'::pg_catalog.tstzmultirange),coalesce(pg_catalog.bool_or(x.source='direct'),false),coalesce(pg_catalog.bool_or(x.source='pathway'),false)
+  into screening_coverage,direct_ok,pathway_ok from (
+    select pg_catalog.tstzrange(greatest(v.effective_from,p_start),least(coalesce(v.effective_until,p_end),coalesce(v.clearance_expires_at,p_end),p_end),'[)') coverage,'direct'::text source
+    from public.worker_screening_verification_versions v
+    where v.organisation_id=p_organisation_id and v.worker_membership_id=m.id and v.role_version_id=role_row.id and v.status='active' and v.clearance_status='current' and v.verified_at<=p_start and not(v.interim_bar or v.suspension or v.exclusion or v.revocation)
+      and greatest(v.effective_from,p_start)<least(coalesce(v.effective_until,p_end),coalesce(v.clearance_expires_at,p_end),p_end)
+    union all
+    select pg_catalog.tstzrange(b.window_start,b.window_end,'[)'),'pathway'::text
+    from public.worker_screening_pathway_versions w
+    cross join lateral (select greatest(w.effective_from,w.pathway_start,p_start) window_start,least(coalesce(w.effective_until,p_end),w.pathway_end,p_end) window_end) b
+    where w.organisation_id=p_organisation_id and w.worker_membership_id=m.id and w.role_version_id=role_row.id and w.status='active' and b.window_start<b.window_end and w.jurisdiction=c.jurisdiction and w.jurisdiction=any(scope.jurisdictions)
+      and nullif(pg_catalog.btrim(w.application_placement_contract_reference),'') is not null and nullif(pg_catalog.btrim(w.supervisor_clearance_reference),'') is not null and nullif(pg_catalog.btrim(w.risk_management_plan_reference),'') is not null and w.supervisor_membership_id is not null and w.supervisor_membership_id<>m.id
+      and ((w.pathway in ('secondary_school_work_experience','working_on_application') and w.administering_organisation is null) or (w.pathway in ('higher_education_placement','contractor_administered') and nullif(pg_catalog.btrim(w.administering_organisation),'') is not null))
+      and exists(select 1 from public.organisation_memberships sm where sm.id=w.supervisor_membership_id and sm.organisation_id=p_organisation_id and sm.status='active' and (public.membership_has_role(sm.id,'admin') or public.membership_has_role(sm.id,'scheduler') or public.membership_has_role(sm.id,'worker')) and sm.effective_from<=b.window_start and (sm.effective_until is null or sm.effective_until>=b.window_end)
+        and exists(select 1 from public.worker_screening_verification_versions sv where sv.organisation_id=p_organisation_id and sv.worker_membership_id=sm.id and sv.status='active' and sv.clearance_status='current' and sv.verified_at<=b.window_start and sv.effective_from<=b.window_start and (sv.effective_until is null or sv.effective_until>=b.window_end) and (sv.clearance_expires_at is null or sv.clearance_expires_at>=b.window_end) and not(sv.interim_bar or sv.suspension or sv.exclusion or sv.revocation)))
+  ) x;
   select exists(select 1 from public.worker_screening_verification_versions v where v.organisation_id=p_organisation_id and v.worker_membership_id=m.id and v.effective_from<=p_end and (v.effective_until is null or v.effective_until>=p_start) and (v.interim_bar or v.suspension or v.exclusion or v.revocation)) into bad_screening;
   if bad_screening then return pg_catalog.jsonb_build_object('ready',false,'reason','adverse_screening_status','role_version_id',role_row.id); end if;
-  if required_screening and not(direct_ok or pathway_ok) then return pg_catalog.jsonb_build_object('ready',false,'reason','screening_not_current','role_version_id',role_row.id); end if;
-  select exists(select 1 from public.role_competence_requirements r where r.organisation_id=p_organisation_id and r.role_version_id=role_row.id and r.support_category=item.support_category and r.requirement_state='required' and r.status='active' and r.effective_from<=p_start and (r.effective_until is null or r.effective_until>=p_end) and not exists(select 1 from public.worker_competence_evidence_versions e where e.organisation_id=p_organisation_id and e.worker_membership_id=m.id and e.requirement_id=r.id and e.status='active' and e.assessed_state='met' and e.evidence_type=r.evidence_type and e.effective_from<=p_start and (e.effective_until is null or e.effective_until>=p_end) and (e.expires_at is null or e.expires_at>=p_end))) into missing_competence;
+  if required_screening and not(required_windows <@ screening_coverage) then return pg_catalog.jsonb_build_object('ready',false,'reason','screening_not_current','role_version_id',role_row.id); end if;
+  select exists(select 1 from public.role_competence_requirements r where r.organisation_id=p_organisation_id and r.role_version_id=role_row.id and r.support_category=item.support_category and r.requirement_state='required' and r.status='active' and r.effective_from<p_end and (r.effective_until is null or r.effective_until>p_start) and not exists(select 1 from public.worker_competence_evidence_versions e where e.organisation_id=p_organisation_id and e.worker_membership_id=m.id and e.requirement_id=r.id and e.status='active' and e.assessed_state='met' and e.evidence_type=r.evidence_type and e.effective_from<=greatest(p_start,r.effective_from) and (e.effective_until is null or e.effective_until>=least(p_end,coalesce(r.effective_until,p_end))) and (e.expires_at is null or e.expires_at>=least(p_end,coalesce(r.effective_until,p_end))))) into missing_competence;
   if missing_competence then return pg_catalog.jsonb_build_object('ready',false,'reason','competence_not_current','role_version_id',role_row.id); end if;
-  return pg_catalog.jsonb_build_object('ready',true,'context_id',c.id,'participant_id',c.participant_id,'capability_id',cap.id,'catalogue_item_id',item.id,'catalogue_version_id',catalogue.id,'role_version_id',role_row.id,'jurisdiction',c.jurisdiction,'screening_source',case when direct_ok then 'provider_verification' when pathway_ok then 'named_pathway' else 'not_required' end);
+  return pg_catalog.jsonb_build_object('ready',true,'context_id',c.id,'participant_id',c.participant_id,'capability_id',cap.id,'catalogue_item_id',item.id,'catalogue_version_id',catalogue.id,'role_version_id',role_row.id,'jurisdiction',c.jurisdiction,'screening_source',case when direct_ok and pathway_ok then 'combined_verification_pathway' when direct_ok then 'provider_verification' when pathway_ok then 'named_pathway' else 'not_required' end);
 end $$;
 revoke all on function public.provider_readiness(uuid,uuid,uuid,uuid,timestamptz,timestamptz) from public;
 revoke all on function public.provider_readiness(uuid,uuid,uuid,uuid,timestamptz,timestamptz) from anon;
 
+alter table public.service_acknowledgement_events add column if not exists authority_source_type text;
+alter table public.service_acknowledgement_events add column if not exists authority_source_id uuid;
+
 create or replace function public.cmd_admin_record_acknowledgement(p_command_id text,p_organisation_id uuid,p_shift_id uuid,p_event_class text,p_event_type text,p_reported_signer_profile_id uuid,p_authority_type text,p_method text,p_occurred_at timestamptz,p_reason text,p_external_evidence_reference text,p_expected_current_event_id uuid,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; reserved record; prior public.service_acknowledgement_events%rowtype; ev public.service_acknowledgement_events%rowtype; valid_authority boolean:=false; out jsonb;
+declare actor uuid; reserved record; prior public.service_acknowledgement_events%rowtype; ev public.service_acknowledgement_events%rowtype; authority_record uuid; authority_source text; out jsonb; retry jsonb;
 begin
-  actor:=public.current_membership(p_organisation_id);
-  if actor is null or public.current_user_membership_role() not in ('admin','scheduler') then raise exception 'admin_or_scheduler_required' using errcode='42501'; end if;
+  actor:=public.require_05b_admin_or_scheduler(p_organisation_id,false);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_acknowledgement',p_organisation_id); if retry is not null then return retry; end if;
   if not exists(select 1 from public.shifts s where s.id=p_shift_id and s.organisation_id=p_organisation_id) then raise exception 'shift_not_found'; end if;
   perform 1 from public.shifts s where s.id=p_shift_id and s.organisation_id=p_organisation_id for update;
   if p_event_class not in ('attempt','conclusive') then raise exception 'ack_event_class_invalid'; end if;
@@ -689,19 +743,24 @@ begin
   select * into reserved from public.reserve_admin_command(p_command_id,'admin_acknowledgement',p_organisation_id,p_payload);
   if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   if p_event_class='conclusive' then
-    valid_authority := (p_authority_type='participant_self' and exists(select 1 from public.shifts s join public.participant_self_links l on l.participant_id=s.participant_id and l.organisation_id=s.organisation_id where s.id=p_shift_id and l.profile_id=p_reported_signer_profile_id and l.status='active'))
-      or (p_authority_type in ('child_representative','plan_nominee','legal_guardian') and exists(select 1 from public.shifts s join public.representative_authorities a on a.participant_id=s.participant_id and a.organisation_id=s.organisation_id where s.id=p_shift_id and a.representative_profile_id=p_reported_signer_profile_id and a.authority_type=p_authority_type and a.status='active' and p_occurred_at>=a.effective_from and (a.effective_until is null or p_occurred_at<a.effective_until) and ('service_acknowledgement'=any(a.scope_categories) or 'service_summary'=any(a.scope_categories))));
-    if not valid_authority then raise exception 'ack_authority_not_allowed'; end if;
+    if p_authority_type='participant_self' then
+      select l.id into authority_record from public.shifts s join public.participant_self_links l on l.participant_id=s.participant_id and l.organisation_id=s.organisation_id where s.id=p_shift_id and l.profile_id=p_reported_signer_profile_id and l.linked_at<=p_occurred_at and (l.withdrawn_at is null or l.withdrawn_at>p_occurred_at) limit 1;
+      authority_source:='participant_self_link';
+    elsif p_authority_type in ('child_representative','plan_nominee','legal_guardian') then
+      select a.id into authority_record from public.shifts s join public.representative_authorities a on a.participant_id=s.participant_id and a.organisation_id=s.organisation_id where s.id=p_shift_id and a.representative_profile_id=p_reported_signer_profile_id and a.authority_type=p_authority_type and p_occurred_at>=a.effective_from and (a.effective_until is null or p_occurred_at<a.effective_until) and (a.withdrawn_at is null or p_occurred_at<a.withdrawn_at) and 'service_acknowledgement'=any(a.scope_categories) order by a.effective_from desc limit 1;
+      authority_source:='representative_authority';
+    end if;
+    if authority_record is null then raise exception 'ack_authority_not_allowed'; end if;
     select e.* into prior from public.service_acknowledgement_events e where e.id in (select id from public.service_acknowledgement_current where shift_id=p_shift_id) limit 1;
     if prior.id is not null and p_expected_current_event_id is distinct from prior.id then
-      insert into public.service_acknowledgement_events(organisation_id,shift_id,event_class,event_type,source_channel,recorder_profile_id,reported_signer_profile_id,authority_type,method,occurred_at,external_evidence_reference,reason,command_receipt_id,review_only) values(p_organisation_id,p_shift_id,'conclusive',p_event_type,'provider_recorded',auth.uid(),p_reported_signer_profile_id,p_authority_type,p_method,p_occurred_at,p_external_evidence_reference,p_reason,reserved.receipt_id,true) returning * into ev;
+      insert into public.service_acknowledgement_events(organisation_id,shift_id,event_class,event_type,source_channel,recorder_profile_id,reported_signer_profile_id,authority_type,authority_source_type,authority_source_id,method,occurred_at,external_evidence_reference,reason,command_receipt_id,review_only) values(p_organisation_id,p_shift_id,'conclusive',p_event_type,'provider_recorded',auth.uid(),p_reported_signer_profile_id,p_authority_type,authority_source,authority_record,p_method,p_occurred_at,p_external_evidence_reference,p_reason,reserved.receipt_id,true) returning * into ev;
       insert into public.service_acknowledgement_reviews(organisation_id,shift_id,event_id,reason) values(p_organisation_id,p_shift_id,ev.id,'stale_expected_current_event');
       out:=pg_catalog.jsonb_build_object('status','conflict_preserved','event_id',ev.id,'reason','stale_expected_current_event'); perform public.finalize_admin_command(reserved.receipt_id,out); return pg_catalog.jsonb_build_object('status','conflict_preserved','receipt_id',reserved.receipt_id)||out;
     end if;
     if prior.id is not null and p_expected_current_event_id is not null and nullif(pg_catalog.btrim(p_reason),'') is null then raise exception 'ack_correction_reason_required'; end if;
     if prior.id is null and p_expected_current_event_id is not null then raise exception 'stale_expected_current_event'; end if;
   end if;
-  insert into public.service_acknowledgement_events(organisation_id,shift_id,event_class,event_type,source_channel,recorder_profile_id,reported_signer_profile_id,authority_type,method,occurred_at,external_evidence_reference,reason,supersedes_event_id,command_receipt_id,review_only) values(p_organisation_id,p_shift_id,p_event_class,p_event_type,'provider_recorded',auth.uid(),p_reported_signer_profile_id,p_authority_type,p_method,p_occurred_at,p_external_evidence_reference,p_reason,case when p_event_class='conclusive' then p_expected_current_event_id else null end,reserved.receipt_id,false) returning * into ev;
+  insert into public.service_acknowledgement_events(organisation_id,shift_id,event_class,event_type,source_channel,recorder_profile_id,reported_signer_profile_id,authority_type,authority_source_type,authority_source_id,method,occurred_at,external_evidence_reference,reason,supersedes_event_id,command_receipt_id,review_only) values(p_organisation_id,p_shift_id,p_event_class,p_event_type,'provider_recorded',auth.uid(),p_reported_signer_profile_id,p_authority_type,authority_source,authority_record,p_method,p_occurred_at,p_external_evidence_reference,p_reason,case when p_event_class='conclusive' then p_expected_current_event_id else null end,reserved.receipt_id,false) returning * into ev;
   out:=pg_catalog.jsonb_build_object('event_id',ev.id,'current_event_id',case when p_event_class='conclusive' then ev.id else coalesce(prior.id,null) end,'source_label','Provider-recorded; not participant-authenticated'); perform public.finalize_admin_command(reserved.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',reserved.receipt_id)||out;
 end $$;
 revoke all on function public.cmd_admin_record_acknowledgement(text,uuid,uuid,text,text,uuid,text,text,timestamptz,text,text,uuid,jsonb) from public;
@@ -711,12 +770,23 @@ grant execute on function public.cmd_admin_record_acknowledgement(text,uuid,uuid
 ------------------------------------------------------------------------
 -- Typed administration commands and safe office projections
 ------------------------------------------------------------------------
+create or replace function public.lookup_05b_admin_retry(p_command_id text,p_command_type text,p_organisation_id uuid)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  select pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.id,'outcome',r.outcome)
+  from public.command_receipts r
+  where r.organisation_id=p_organisation_id and r.actor_membership_id=public.current_membership(p_organisation_id)
+    and r.actor_profile_id=auth.uid() and r.command_type=p_command_type and r.command_id=p_command_id and r.completed_at is not null
+  limit 1
+$$;
+revoke all on function public.lookup_05b_admin_retry(text,text,uuid) from public;
+revoke all on function public.lookup_05b_admin_retry(text,text,uuid) from anon;
+
 create or replace function public.require_05b_admin_or_scheduler(p_organisation_id uuid, p_admin_only boolean default false)
 returns uuid language plpgsql security definer set search_path = '' as $$
-declare m uuid; r text;
+declare m uuid;
 begin
-  m:=public.current_membership(p_organisation_id); select role into r from public.organisation_memberships where id=m;
-  if m is null or (p_admin_only and r<>'admin') or (not p_admin_only and r not in ('admin','scheduler')) then raise exception 'admin_or_scheduler_required' using errcode='42501'; end if;
+  m:=public.current_membership(p_organisation_id);
+  if m is null or (p_admin_only and not public.membership_has_role(m,'admin')) or (not p_admin_only and not public.membership_has_role(m,'admin') and not public.membership_has_role(m,'scheduler')) then raise exception 'admin_or_scheduler_required' using errcode='42501'; end if;
   return m;
 end $$;
 revoke all on function public.require_05b_admin_or_scheduler(uuid,boolean) from public;
@@ -724,11 +794,12 @@ revoke all on function public.require_05b_admin_or_scheduler(uuid,boolean) from 
 
 create or replace function public.cmd_admin_create_provider_scope_version(p_command_id text,p_organisation_id uuid,p_registration_state text,p_registration_group text,p_class_of_support text,p_jurisdictions text[],p_effective_from timestamptz,p_effective_until timestamptz,p_reviewed_by uuid,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare actor uuid; r record; row_id uuid; out jsonb;
+declare actor uuid; r record; row_id uuid; out jsonb; retry jsonb;
 begin
   actor:=public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_provider_scope',p_organisation_id); if retry is not null then return retry; end if;
   if p_registration_state not in ('registered','unregistered') or p_jurisdictions is null or cardinality(p_jurisdictions)=0 or exists(select 1 from pg_catalog.unnest(p_jurisdictions) j where nullif(pg_catalog.btrim(j),'') is null) or p_effective_until is not null and p_effective_until<=p_effective_from then raise exception 'provider_scope_invalid'; end if;
-  if p_reviewed_by is not null and not exists(select 1 from public.organisation_memberships m where m.organisation_id=p_organisation_id and m.profile_id=p_reviewed_by and m.status='active' and m.role='admin') then raise exception 'provider_scope_reviewer_invalid'; end if;
+  if p_reviewed_by is not null and not exists(select 1 from public.organisation_memberships m where m.organisation_id=p_organisation_id and m.profile_id=p_reviewed_by and public.membership_has_role(m.id,'admin')) then raise exception 'provider_scope_reviewer_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_provider_scope',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.organisation_provider_scope_versions(organisation_id,registration_state,registration_group,class_of_support,jurisdictions,effective_from,effective_until,authored_by,reviewed_by) values(p_organisation_id,p_registration_state,nullif(pg_catalog.btrim(p_registration_group),''),nullif(pg_catalog.btrim(p_class_of_support),''),array(select distinct pg_catalog.upper(pg_catalog.btrim(j)) from pg_catalog.unnest(p_jurisdictions) j),p_effective_from,p_effective_until,auth.uid(),p_reviewed_by) returning id into row_id;
   out:=pg_catalog.jsonb_build_object('scope_version_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
@@ -739,9 +810,10 @@ grant execute on function public.cmd_admin_create_provider_scope_version(text,uu
 
 create or replace function public.cmd_admin_create_support_capability(p_command_id text,p_organisation_id uuid,p_scope_version_id uuid,p_support_category text,p_service_kind text,p_capability text,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_provider_scope',p_organisation_id); if retry is not null then return retry; end if;
   if p_capability not in ('individual_time_supported','specialist_phased','not_supported') or nullif(pg_catalog.btrim(p_support_category),'') is null or nullif(pg_catalog.btrim(p_service_kind),'') is null or p_effective_until is not null and p_effective_until<=p_effective_from or p_capability='individual_time_supported' and pg_catalog.btrim(p_service_kind)<>'individual_time' or not exists(select 1 from public.organisation_provider_scope_versions s where s.id=p_scope_version_id and s.organisation_id=p_organisation_id and s.status='active' and s.effective_from<=p_effective_from and (s.effective_until is null or (p_effective_until is not null and s.effective_until>=p_effective_until))) then raise exception 'support_capability_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_provider_scope',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.organisation_support_capabilities(organisation_id,scope_version_id,support_category,service_kind,capability,effective_from,effective_until) values(p_organisation_id,p_scope_version_id,pg_catalog.btrim(p_support_category),pg_catalog.btrim(p_service_kind),p_capability,p_effective_from,p_effective_until) returning id into row_id;
@@ -753,9 +825,10 @@ grant execute on function public.cmd_admin_create_support_capability(text,uuid,u
 
 create or replace function public.cmd_admin_create_catalogue_item(p_command_id text,p_organisation_id uuid,p_source_label text,p_source_version text,p_catalogue_effective_from timestamptz,p_catalogue_effective_until timestamptz,p_item_code text,p_item_name text,p_support_category text,p_time_unit text,p_service_kind text,p_item_effective_from timestamptz,p_item_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; cv uuid; item uuid; out jsonb;
+declare r record; cv uuid; item uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_catalogue',p_organisation_id); if retry is not null then return retry; end if;
   if nullif(pg_catalog.btrim(p_source_label),'') is null or nullif(pg_catalog.btrim(p_source_version),'') is null or nullif(pg_catalog.btrim(p_item_code),'') is null or nullif(pg_catalog.btrim(p_item_name),'') is null or nullif(pg_catalog.btrim(p_support_category),'') is null or nullif(pg_catalog.btrim(p_service_kind),'') is null or p_time_unit not in ('hour','minute') or p_catalogue_effective_until is not null and p_catalogue_effective_until<=p_catalogue_effective_from or p_item_effective_until is not null and p_item_effective_until<=p_item_effective_from or p_item_effective_from<p_catalogue_effective_from or (p_catalogue_effective_until is not null and (p_item_effective_until is null or p_item_effective_until>p_catalogue_effective_until)) then raise exception 'catalogue_item_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_catalogue',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.provider_support_catalogue_versions(organisation_id,source_label,source_version,effective_from,effective_until,created_by) values(p_organisation_id,pg_catalog.btrim(p_source_label),pg_catalog.btrim(p_source_version),p_catalogue_effective_from,p_catalogue_effective_until,auth.uid()) returning id into cv;
@@ -768,10 +841,11 @@ grant execute on function public.cmd_admin_create_catalogue_item(text,uuid,text,
 
 create or replace function public.cmd_admin_record_worker_verification(p_command_id text,p_organisation_id uuid,p_worker_membership_id uuid,p_role_version_id uuid,p_source_checked text,p_verifier_name text,p_verified_at timestamptz,p_application_or_check_reference text,p_clearance_status text,p_clearance_expires_at timestamptz,p_interim_bar boolean,p_suspension boolean,p_exclusion boolean,p_revocation boolean,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,false); perform public.lock_05b_readiness(p_organisation_id);
-  if p_clearance_status not in ('current','expired','pending','not_required') or p_effective_until is not null and p_effective_until<=p_effective_from or p_clearance_expires_at is not null and p_clearance_expires_at<p_effective_from or p_verified_at>pg_catalog.now() or not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and m.role='worker' and m.status='active') or not exists(select 1 from public.risk_assessed_role_versions v where v.id=p_role_version_id and v.organisation_id=p_organisation_id and v.status='active') or nullif(pg_catalog.btrim(p_source_checked),'') is null or nullif(pg_catalog.btrim(p_verifier_name),'') is null or nullif(pg_catalog.btrim(p_application_or_check_reference),'') is null then raise exception 'screening_verification_invalid'; end if;
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
+  if p_clearance_status not in ('current','expired','pending','not_required') or p_effective_until is not null and p_effective_until<=p_effective_from or p_clearance_expires_at is not null and p_clearance_expires_at<p_effective_from or p_verified_at>pg_catalog.now() or not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and public.membership_has_role(m.id,'worker')) or not exists(select 1 from public.risk_assessed_role_versions v where v.id=p_role_version_id and v.organisation_id=p_organisation_id and v.status='active') or nullif(pg_catalog.btrim(p_source_checked),'') is null or nullif(pg_catalog.btrim(p_verifier_name),'') is null or nullif(pg_catalog.btrim(p_application_or_check_reference),'') is null then raise exception 'screening_verification_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.worker_screening_verification_versions(organisation_id,worker_membership_id,role_version_id,source_checked,verifier_name,verified_at,application_or_check_reference,clearance_status,clearance_expires_at,interim_bar,suspension,exclusion,revocation,effective_from,effective_until,created_by) values(p_organisation_id,p_worker_membership_id,p_role_version_id,pg_catalog.btrim(p_source_checked),pg_catalog.btrim(p_verifier_name),p_verified_at,pg_catalog.btrim(p_application_or_check_reference),p_clearance_status,p_clearance_expires_at,p_interim_bar,p_suspension,p_exclusion,p_revocation,p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
   out:=pg_catalog.jsonb_build_object('verification_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
@@ -782,10 +856,11 @@ grant execute on function public.cmd_admin_record_worker_verification(text,uuid,
 
 create or replace function public.cmd_admin_record_competence_evidence(p_command_id text,p_organisation_id uuid,p_worker_membership_id uuid,p_requirement_id uuid,p_evidence_type text,p_issuer text,p_evidence_reference text,p_verifier_name text,p_assessed_state text,p_limitation text,p_expires_at timestamptz,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,false); perform public.lock_05b_readiness(p_organisation_id);
-  if p_effective_until is not null and p_effective_until<=p_effective_from or p_expires_at is not null and p_expires_at<p_effective_from or not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and m.role='worker' and m.status='active') or not exists(select 1 from public.role_competence_requirements q where q.id=p_requirement_id and q.organisation_id=p_organisation_id and q.requirement_state='required' and q.status='active' and q.evidence_type=pg_catalog.btrim(p_evidence_type)) or nullif(pg_catalog.btrim(p_issuer),'') is null or nullif(pg_catalog.btrim(p_evidence_reference),'') is null or nullif(pg_catalog.btrim(p_verifier_name),'') is null or p_assessed_state not in ('met','not_met','pending') then raise exception 'competence_evidence_invalid'; end if;
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
+  if p_effective_until is not null and p_effective_until<=p_effective_from or p_expires_at is not null and p_expires_at<p_effective_from or not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and public.membership_has_role(m.id,'worker')) or not exists(select 1 from public.role_competence_requirements q where q.id=p_requirement_id and q.organisation_id=p_organisation_id and q.requirement_state='required' and q.status='active' and q.evidence_type=pg_catalog.btrim(p_evidence_type)) or nullif(pg_catalog.btrim(p_issuer),'') is null or nullif(pg_catalog.btrim(p_evidence_reference),'') is null or nullif(pg_catalog.btrim(p_verifier_name),'') is null or p_assessed_state not in ('met','not_met','pending') then raise exception 'competence_evidence_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.worker_competence_evidence_versions(organisation_id,worker_membership_id,requirement_id,evidence_type,issuer,evidence_reference,verifier_name,assessed_state,limitation,expires_at,effective_from,effective_until,created_by) values(p_organisation_id,p_worker_membership_id,p_requirement_id,pg_catalog.btrim(p_evidence_type),pg_catalog.btrim(p_issuer),pg_catalog.btrim(p_evidence_reference),pg_catalog.btrim(p_verifier_name),p_assessed_state,nullif(pg_catalog.btrim(p_limitation),''),p_expires_at,p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
   out:=pg_catalog.jsonb_build_object('competence_evidence_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
@@ -796,9 +871,10 @@ grant execute on function public.cmd_admin_record_competence_evidence(text,uuid,
 
 create or replace function public.cmd_admin_create_risk_role(p_command_id text,p_organisation_id uuid,p_title text,p_definition_basis text,p_description text,p_assessed_at timestamptz,p_assessor_name text,p_assessor_title text,p_risk_assessed boolean,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
   if p_effective_until is not null and p_effective_until<=p_effective_from or p_assessed_at>pg_catalog.now() or nullif(pg_catalog.btrim(p_title),'') is null or nullif(pg_catalog.btrim(p_definition_basis),'') is null or nullif(pg_catalog.btrim(p_description),'') is null or nullif(pg_catalog.btrim(p_assessor_name),'') is null or nullif(pg_catalog.btrim(p_assessor_title),'') is null then raise exception 'risk_role_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.risk_assessed_role_versions(organisation_id,title,definition_basis,description,assessed_at,assessor_name,assessor_title,risk_assessed,effective_from,effective_until,created_by) values(p_organisation_id,pg_catalog.btrim(p_title),pg_catalog.btrim(p_definition_basis),pg_catalog.btrim(p_description),p_assessed_at,pg_catalog.btrim(p_assessor_name),pg_catalog.btrim(p_assessor_title),p_risk_assessed,p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
@@ -810,9 +886,10 @@ grant execute on function public.cmd_admin_create_risk_role(text,uuid,text,text,
 
 create or replace function public.cmd_admin_create_screening_policy(p_command_id text,p_organisation_id uuid,p_role_version_id uuid,p_registration_state text,p_decision text,p_decision_owner text,p_decision_reason text,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
   if p_effective_until is not null and p_effective_until<=p_effective_from or p_registration_state not in ('registered','unregistered') or p_decision not in ('required','not_required') or not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active' and x.effective_from<=p_effective_from and (x.effective_until is null or (p_effective_until is not null and x.effective_until>=p_effective_until))) or nullif(pg_catalog.btrim(p_decision_owner),'') is null or nullif(pg_catalog.btrim(p_decision_reason),'') is null then raise exception 'screening_policy_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.role_screening_policy_versions(organisation_id,role_version_id,registration_state,decision,decision_owner,decision_reason,effective_from,effective_until,created_by) values(p_organisation_id,p_role_version_id,p_registration_state,p_decision,pg_catalog.btrim(p_decision_owner),pg_catalog.btrim(p_decision_reason),p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
@@ -824,9 +901,10 @@ grant execute on function public.cmd_admin_create_screening_policy(text,uuid,uui
 
 create or replace function public.cmd_admin_create_competence_requirement(p_command_id text,p_organisation_id uuid,p_role_version_id uuid,p_support_category text,p_evidence_type text,p_requirement_state text,p_assessment_method text,p_review_owner text,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
   if p_effective_until is not null and p_effective_until<=p_effective_from or p_requirement_state not in ('required','not_required') or nullif(pg_catalog.btrim(p_support_category),'') is null or nullif(pg_catalog.btrim(p_evidence_type),'') is null or nullif(pg_catalog.btrim(p_assessment_method),'') is null or nullif(pg_catalog.btrim(p_review_owner),'') is null or not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active' and x.effective_from<=p_effective_from and (x.effective_until is null or (p_effective_until is not null and x.effective_until>=p_effective_until))) then raise exception 'competence_requirement_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.role_competence_requirements(organisation_id,role_version_id,support_category,evidence_type,requirement_state,assessment_method,review_owner,effective_from,effective_until,created_by) values(p_organisation_id,p_role_version_id,pg_catalog.btrim(p_support_category),pg_catalog.btrim(p_evidence_type),p_requirement_state,pg_catalog.btrim(p_assessment_method),pg_catalog.btrim(p_review_owner),p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
@@ -838,10 +916,11 @@ grant execute on function public.cmd_admin_create_competence_requirement(text,uu
 
 create or replace function public.cmd_admin_record_worker_pathway(p_command_id text,p_organisation_id uuid,p_worker_membership_id uuid,p_role_version_id uuid,p_pathway text,p_jurisdiction text,p_application_placement_contract_reference text,p_pathway_start timestamptz,p_pathway_end timestamptz,p_supervisor_membership_id uuid,p_supervisor_clearance_reference text,p_risk_management_plan_reference text,p_administering_organisation text,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; row_id uuid; out jsonb;
+declare r record; row_id uuid; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,false); perform public.lock_05b_readiness(p_organisation_id);
-  if p_pathway not in ('secondary_school_work_experience','working_on_application','higher_education_placement','contractor_administered') or nullif(pg_catalog.btrim(p_jurisdiction),'') is null or nullif(pg_catalog.btrim(p_application_placement_contract_reference),'') is null or nullif(pg_catalog.btrim(p_supervisor_clearance_reference),'') is null or nullif(pg_catalog.btrim(p_risk_management_plan_reference),'') is null or p_pathway_end<=p_pathway_start or p_effective_until is not null and p_effective_until<=p_effective_from or p_pathway_start>p_effective_from or (p_effective_until is not null and p_pathway_end<p_effective_until) or p_supervisor_membership_id=p_worker_membership_id or not exists(select 1 from public.organisation_memberships x where x.id=p_worker_membership_id and x.organisation_id=p_organisation_id and x.role='worker' and x.status='active') or not exists(select 1 from public.organisation_memberships x where x.id=p_supervisor_membership_id and x.organisation_id=p_organisation_id and x.status='active') or not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active') or p_pathway in ('higher_education_placement','contractor_administered') and nullif(pg_catalog.btrim(p_administering_organisation),'') is null or p_pathway in ('secondary_school_work_experience','working_on_application') and nullif(pg_catalog.btrim(p_administering_organisation),'') is not null then raise exception 'screening_pathway_invalid'; end if;
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_worker_readiness',p_organisation_id); if retry is not null then return retry; end if;
+  if p_pathway not in ('secondary_school_work_experience','working_on_application','higher_education_placement','contractor_administered') or nullif(pg_catalog.btrim(p_jurisdiction),'') is null or nullif(pg_catalog.btrim(p_application_placement_contract_reference),'') is null or nullif(pg_catalog.btrim(p_supervisor_clearance_reference),'') is null or nullif(pg_catalog.btrim(p_risk_management_plan_reference),'') is null or p_pathway_end<=p_pathway_start or p_effective_until is not null and p_effective_until<=p_effective_from or p_pathway_start>p_effective_from or (p_effective_until is not null and p_pathway_end<p_effective_until) or p_supervisor_membership_id=p_worker_membership_id or not exists(select 1 from public.organisation_memberships x where x.id=p_worker_membership_id and x.organisation_id=p_organisation_id and public.membership_has_role(x.id,'worker')) or not exists(select 1 from public.organisation_memberships x where x.id=p_supervisor_membership_id and x.organisation_id=p_organisation_id and x.status='active') or not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active') or p_pathway in ('higher_education_placement','contractor_administered') and nullif(pg_catalog.btrim(p_administering_organisation),'') is null or p_pathway in ('secondary_school_work_experience','working_on_application') and nullif(pg_catalog.btrim(p_administering_organisation),'') is not null then raise exception 'screening_pathway_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   insert into public.worker_screening_pathway_versions(organisation_id,worker_membership_id,role_version_id,pathway,jurisdiction,application_placement_contract_reference,pathway_start,pathway_end,supervisor_membership_id,supervisor_clearance_reference,risk_management_plan_reference,administering_organisation,effective_from,effective_until,created_by) values(p_organisation_id,p_worker_membership_id,p_role_version_id,p_pathway,pg_catalog.btrim(p_jurisdiction),pg_catalog.btrim(p_application_placement_contract_reference),p_pathway_start,p_pathway_end,p_supervisor_membership_id,pg_catalog.btrim(p_supervisor_clearance_reference),pg_catalog.btrim(p_risk_management_plan_reference),nullif(pg_catalog.btrim(p_administering_organisation),''),p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
   out:=pg_catalog.jsonb_build_object('pathway_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
@@ -852,12 +931,13 @@ grant execute on function public.cmd_admin_record_worker_pathway(text,uuid,uuid,
 
 create or replace function public.cmd_admin_update_service_context_state(p_command_id text,p_organisation_id uuid,p_context_id uuid,p_lifecycle_state text,p_reviewer_profile_id uuid,p_role_version_id uuid,p_jurisdiction text,p_reason text,p_payload jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r record; out jsonb;
+declare r record; out jsonb; retry jsonb;
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,true); perform public.lock_05b_readiness(p_organisation_id);
+  retry:=public.lookup_05b_admin_retry(p_command_id,'admin_service_context',p_organisation_id); if retry is not null then return retry; end if;
   if p_lifecycle_state not in ('draft','active','review_required','superseded','withdrawn','expired') then raise exception 'context_lifecycle_invalid'; end if;
   if p_lifecycle_state='active' and (p_reviewer_profile_id is null or p_role_version_id is null or nullif(pg_catalog.btrim(p_jurisdiction),'') is null) then raise exception 'reviewed_context_required'; end if;
-  if p_reviewer_profile_id is not null and not exists(select 1 from public.organisation_memberships m where m.organisation_id=p_organisation_id and m.profile_id=p_reviewer_profile_id and m.status='active' and m.role in ('admin','scheduler')) then raise exception 'context_reviewer_invalid'; end if;
+  if p_reviewer_profile_id is not null and not exists(select 1 from public.organisation_memberships m where m.organisation_id=p_organisation_id and m.profile_id=p_reviewer_profile_id and (public.membership_has_role(m.id,'admin') or public.membership_has_role(m.id,'scheduler'))) then raise exception 'context_reviewer_invalid'; end if;
   if p_role_version_id is not null and not exists(select 1 from public.risk_assessed_role_versions x where x.id=p_role_version_id and x.organisation_id=p_organisation_id and x.status='active') then raise exception 'context_role_invalid'; end if;
   select * into r from public.reserve_admin_command(p_command_id,'admin_service_context',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
   update public.participant_service_context_versions c set lifecycle_state=p_lifecycle_state,reviewer_profile_id=coalesce(p_reviewer_profile_id,c.reviewer_profile_id),role_version_id=coalesce(p_role_version_id,c.role_version_id),jurisdiction=coalesce(nullif(pg_catalog.btrim(p_jurisdiction),''),c.jurisdiction)
@@ -880,12 +960,13 @@ revoke all on function public.list_admin_provider_readiness(uuid,uuid,uuid,uuid,
 revoke all on function public.list_admin_provider_readiness(uuid,uuid,uuid,uuid,timestamptz,timestamptz) from anon;
 grant execute on function public.list_admin_provider_readiness(uuid,uuid,uuid,uuid,timestamptz,timestamptz) to authenticated;
 
-create or replace function public.list_admin_acknowledgement_ledger(p_organisation_id uuid,p_shift_id uuid)
-returns table(id uuid,shift_id uuid,event_class text,event_type text,source_channel text,reported_signer_profile_id uuid,authority_type text,method text,occurred_at timestamptz,external_evidence_reference text,reason text,supersedes_event_id uuid,review_only boolean,current_leaf boolean) language plpgsql stable security definer set search_path = '' as $$
+drop function if exists public.list_admin_acknowledgement_ledger(uuid,uuid);
+create function public.list_admin_acknowledgement_ledger(p_organisation_id uuid,p_shift_id uuid)
+returns table(id uuid,shift_id uuid,event_class text,event_type text,source_channel text,recorder_profile_id uuid,reported_signer_profile_id uuid,authority_type text,authority_source_type text,authority_source_id uuid,method text,occurred_at timestamptz,external_evidence_reference text,reason text,supersedes_event_id uuid,review_only boolean,current_leaf boolean) language plpgsql stable security definer set search_path = '' as $$
 begin
   perform public.require_05b_admin_or_scheduler(p_organisation_id,false);
   if p_shift_id is not null and not exists(select 1 from public.shifts s where s.id=p_shift_id and s.organisation_id=p_organisation_id) then raise exception 'shift_not_found'; end if;
-  return query select e.id,e.shift_id,e.event_class,e.event_type,e.source_channel,e.reported_signer_profile_id,e.authority_type,e.method,e.occurred_at,e.external_evidence_reference,e.reason,e.supersedes_event_id,e.review_only,(c.id is not null) from public.service_acknowledgement_events e left join public.service_acknowledgement_current c on c.id=e.id where e.organisation_id=p_organisation_id and (p_shift_id is null or e.shift_id=p_shift_id) order by e.created_at;
+  return query select e.id,e.shift_id,e.event_class,e.event_type,e.source_channel,e.recorder_profile_id,e.reported_signer_profile_id,e.authority_type,e.authority_source_type,e.authority_source_id,e.method,e.occurred_at,e.external_evidence_reference,e.reason,e.supersedes_event_id,e.review_only,(c.id is not null) from public.service_acknowledgement_events e left join public.service_acknowledgement_current c on c.id=e.id where e.organisation_id=p_organisation_id and (p_shift_id is null or e.shift_id=p_shift_id) order by e.created_at;
 end $$;
 revoke all on function public.list_admin_acknowledgement_ledger(uuid,uuid) from public;
 revoke all on function public.list_admin_acknowledgement_ledger(uuid,uuid) from anon;

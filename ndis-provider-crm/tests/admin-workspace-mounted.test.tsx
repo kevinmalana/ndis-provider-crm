@@ -137,20 +137,20 @@ const readinessData = {
     { profile_id: "scheduler-1", full_name: "Sam Scheduler", email: "scheduler@example.test", role: "scheduler", membership_id: "m-scheduler-1" },
   ],
   shifts: [{ id: "shift-ready", participant_id: "p-1", scheduled_start: "2026-09-01T09:00:00Z", scheduled_end: "2026-09-01T10:00:00Z", state: "scheduled" }],
-  serviceContexts: [{ id: "ctx-1", participant_id: "p-1", capability_id: "cap-1", catalogue_item_id: "item-1", role_version_id: "role-1", jurisdiction: "NSW", goal_reference: "Goal 1", lifecycle_state: "active" }],
+  serviceContexts: [{ id: "ctx-1", participant_id: "p-1", capability_id: "cap-1", catalogue_item_id: "item-1", role_version_id: "role-1", jurisdiction: "NSW", owner_profile_id: "admin-1", reviewer_profile_id: "scheduler-1", goal_reference: "Goal 1", lifecycle_state: "active" }],
   providerScopes: [{ id: "scope-1", registration_state: "registered", jurisdictions: ["NSW"], status: "active" }],
   capabilities: [{ id: "cap-1", support_category: "daily_living", service_kind: "individual_time", capability: "individual_time_supported", status: "active" }],
   catalogues: [{ id: "catalogue-1", source_label: "Provider catalogue", source_version: "2026.1", status: "active" }],
   catalogueItems: [{ id: "item-1", catalogue_version_id: "catalogue-1", item_code: "TIME-1", item_name: "Individual time", support_category: "daily_living", service_kind: "individual_time", time_unit: "hour", status: "active" }],
   roles: [{ id: "role-1", title: "Support worker", risk_assessed: true, status: "active" }],
   screeningPolicies: [],
-  screeningVerifications: [{ id: "verify-1", application_or_check_reference: "CHECK-1", clearance_status: "current" }],
+  screeningVerifications: [{ id: "verify-1", worker_membership_id: "m-worker-1", role_version_id: "role-1", source_checked: "State register", verifier_name: "Verifier A", verified_at: "2026-08-01", application_or_check_reference: "CHECK-1", clearance_status: "current", interim_bar: true, suspension: false, exclusion: false, revocation: false, effective_from: "2026-08-01", effective_until: "2026-09-01" }],
   screeningPathways: [],
-  competenceRequirements: [{ id: "requirement-1", evidence_type: "induction", support_category: "daily_living", requirement_state: "required" }],
-  competenceEvidence: [{ id: "evidence-1", evidence_reference: "COMP-1", assessed_state: "met" }],
+  competenceRequirements: [{ id: "requirement-1", role_version_id: "role-1", evidence_type: "induction", support_category: "daily_living", requirement_state: "required", assessment_method: "provider_assessed", review_owner: "Clinical lead", effective_from: "2026-08-01" }],
+  competenceEvidence: [{ id: "evidence-1", worker_membership_id: "m-worker-1", requirement_id: "requirement-1", evidence_reference: "COMP-1", issuer: "Training provider", verifier_name: "Verifier B", assessed_state: "met", effective_from: "2026-08-01" }],
   maskedIdentifiers: [{ participant_id: "p-1", masked_identifier: "*******0123" }],
   snapshots: [{ shift_id: "shift-ready", catalogue_version_id: "catalogue-1", item_code: "TIME-1", item_name: "Individual time", support_category: "daily_living", service_kind: "individual_time", time_unit: "hour", goal_reference: "Goal 1", goal_display: "Community access" }],
-  ackLedger: [{ id: "ack-current", shift_id: "shift-ready", event_class: "conclusive", event_type: "external_signed_evidence", source_channel: "provider_recorded", occurred_at: "2026-09-01T10:05:00Z", reason: "Initial evidence", current_leaf: true, review_only: false }],
+  ackLedger: [{ id: "ack-current", shift_id: "shift-ready", event_class: "conclusive", event_type: "external_signed_evidence", source_channel: "provider_recorded", recorder_profile_id: "admin-1", reported_signer_profile_id: "participant-1", authority_type: "participant_self", authority_source_type: "participant_self_link", authority_source_id: "self-link-1", method: "signed form", external_evidence_reference: "ACK-1", occurred_at: "2026-09-01T10:05:00Z", reason: "Initial evidence", current_leaf: true, review_only: false }],
 };
 
 describe("mounted AdminWorkspace — complete provider readiness surface", () => {
@@ -231,6 +231,63 @@ describe("mounted AdminWorkspace — complete provider readiness surface", () =>
     expect(rpcMock.mock.calls[1][1]).toMatchObject({ p_expected_current_event_id: "ack-current", p_method: "signed_external_form", p_reason: "Supersede incorrect signed outcome", p_event_type: "external_decline_evidence" });
     expect(screen.getByText(/current outcome/i)).toBeInTheDocument();
     expect(screen.getByText(/Provider catalogue · 2026.1 · hour/i)).toBeInTheDocument();
+  });
+
+  it("hydrates lifecycle fields, invalidates stale readiness and role-gates scheduler controls", async () => {
+    rpcMock.mockResolvedValueOnce({ data: { ready: true }, error: null });
+    render(<AdminWorkspace organisation={organisation} initialData={readinessData} />);
+    await clickTab("Readiness");
+    expect(screen.getByRole("button", { name: "Save provider scope version" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save context lifecycle" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Record current screening verification" })).not.toBeDisabled();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Service context"), { target: { value: "ctx-1" } });
+    });
+    expect(screen.getByLabelText("Lifecycle reviewer")).toHaveValue("scheduler-1");
+    expect(screen.getByLabelText("Lifecycle role")).toHaveValue("role-1");
+    expect(screen.getByLabelText("Lifecycle jurisdiction")).toHaveValue("NSW");
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Readiness worker"), { target: { value: "m-worker-1" } });
+      fireEvent.change(screen.getByLabelText("Readiness context"), { target: { value: "ctx-1" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Check readiness" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create service-ready shift" })).not.toBeDisabled());
+    await act(async () => fireEvent.change(screen.getByLabelText("Readiness end"), { target: { value: "2026-09-02T11:00" } }));
+    expect(screen.getByRole("button", { name: "Create service-ready shift" })).toBeDisabled();
+    expect(screen.getByText(/Inputs changed — run readiness again/i)).toBeInTheDocument();
+  });
+
+  it("submits controlled adverse screening and limited competence evidence values", async () => {
+    rpcMock.mockResolvedValue({ data: { status: "accepted" }, error: null });
+    render(<AdminWorkspace organisation={{ ...organisation, role: "admin" }} initialData={readinessData} />);
+    await clickTab("Readiness");
+    fireEvent.change(screen.getByLabelText("Service record"), { target: { value: "shift-ready" } });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Worker"), { target: { value: "m-worker-1" } });
+      fireEvent.change(screen.getByLabelText("Risk-assessed role"), { target: { value: "role-1" } });
+      fireEvent.change(screen.getByLabelText("Screening verifier"), { target: { value: "Reviewer A" } });
+      fireEvent.change(screen.getByLabelText("Application/check reference"), { target: { value: "CHECK-ADVERSE" } });
+      fireEvent.click(screen.getByLabelText("Interim bar"));
+      fireEvent.submit(screen.getByRole("button", { name: "Record current screening verification" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    expect(rpcMock.mock.calls[0][1]).toMatchObject({ p_interim_bar: true, p_verifier_name: "Reviewer A", p_application_or_check_reference: "CHECK-ADVERSE" });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Required competence"), { target: { value: "requirement-1" } });
+      fireEvent.change(screen.getByLabelText("Evidence issuer"), { target: { value: "Issuer A" } });
+      fireEvent.change(screen.getByLabelText("Evidence verifier"), { target: { value: "Verifier A" } });
+      fireEvent.change(screen.getByLabelText("Evidence state"), { target: { value: "not_met" } });
+      fireEvent.change(screen.getByLabelText("Evidence limitation"), { target: { value: "Supervised duties only" } });
+      fireEvent.change(screen.getByLabelText("Evidence reference"), { target: { value: "COMP-LIMITED" } });
+      fireEvent.submit(screen.getByRole("button", { name: "Record competence evidence" }).closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    expect(rpcMock.mock.calls[1][1]).toMatchObject({ p_assessed_state: "not_met", p_limitation: "Supervised duties only", p_issuer: "Issuer A" });
+    expect(screen.getByText(/adverse: bar/i)).toBeInTheDocument();
+    expect(screen.getByText(/authority participant_self/i)).toBeInTheDocument();
+    expect(screen.getByText(/Recorded by: Alice Admin/i)).toBeInTheDocument();
+    expect(screen.getByText(/participant_self_link \/ self-link-1/i)).toBeInTheDocument();
+    expect(screen.getByText(/record COMP-1 · issuer Training provider · verifier Verifier B/i)).toBeInTheDocument();
   });
 });
 

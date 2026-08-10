@@ -168,9 +168,9 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
 
   await ex.execAsService(
     `insert into public.participant_self_links
-       (id, organisation_id, participant_id, profile_id, status, evidence_reference)
+       (id, organisation_id, participant_id, profile_id, status, linked_at, evidence_reference)
      values
-       ('${ids.selfLink}','${ids.org}','${ids.participantRow}','${ids.participant}','active','self-attested')`,
+       ('${ids.selfLink}','${ids.org}','${ids.participantRow}','${ids.participant}','active','2026-08-01T00:00:00Z','self-attested')`,
   );
   await ex.execAsService(
     `insert into public.representative_authorities
