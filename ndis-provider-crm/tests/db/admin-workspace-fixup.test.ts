@@ -242,6 +242,7 @@ describe("ticket 05 DB fixup — consent evidence ACL", () => {
       "cmd_admin_set_availability",
       "cmd_admin_create_shift",
       "cmd_admin_link_participant",
+      "list_admin_workspace_self_links",
     ];
     const rows = (await ex.execAsService(`
       select p.proname,
@@ -563,6 +564,15 @@ describe("ticket 05 DB fixup — representative live membership is required for 
 });
 
 describe("ticket 05 DB fixup — supplementary admin/scheduler roles are honoured everywhere", () => {
+  it("projects only active tenant self-links for scheduler consent selection", async () => {
+    ex.setUser(fx.schedulerUid);
+    const rows = (await ex.exec(`
+      select participant_id, profile_id
+      from public.list_admin_workspace_self_links('${fx.orgId}')
+    `)).rows as Array<{ participant_id: string; profile_id: string }>;
+    expect(rows).toEqual([{ participant_id: fx.participantId, profile_id: fx.participantUid }]);
+  });
+
   it("returns the supplementary role from current_user_membership_role when one is active", async () => {
     ex.setUser(fx.schedulerUid);
     // Add a supplementary admin role on top of the scheduler's base

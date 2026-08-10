@@ -6,6 +6,26 @@
 
 set search_path = '';
 
+-- Minimal tenant-scoped projection for participant-basis consent UI. The
+-- base self-link policy is admin-only; this narrow read also serves
+-- schedulers without exposing evidence or unrelated profile data.
+create or replace function public.list_admin_workspace_self_links(p_organisation_id uuid)
+returns table (participant_id uuid, profile_id uuid)
+language sql stable security definer set search_path = ''
+as $$
+  select sl.participant_id, sl.profile_id
+  from public.participant_self_links sl
+  where sl.organisation_id = p_organisation_id
+    and sl.status = 'active'
+    and (
+      public.membership_has_role(public.current_membership(p_organisation_id), 'admin')
+      or public.membership_has_role(public.current_membership(p_organisation_id), 'scheduler')
+    );
+$$;
+revoke all on function public.list_admin_workspace_self_links(uuid) from public;
+revoke all on function public.list_admin_workspace_self_links(uuid) from anon;
+grant execute on function public.list_admin_workspace_self_links(uuid) to authenticated;
+
 ------------------------------------------------------------------------
 -- Invitation tokens/emails are recoverable only by the issuing actor.
 -- The actor policy remains in 0006; this tenant-wide policy excludes

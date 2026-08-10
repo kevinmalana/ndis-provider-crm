@@ -9,10 +9,12 @@ const state = readFileSync(resolve(process.cwd(), "src/app/app/admin/workspace-s
 describe("admin workspace UI contract", () => {
   it("keeps sensitive reads and consent/grant writes on the protected surfaces", () => {
     expect(page).toContain('list_admin_workspace_identities');
+    expect(page).toContain('list_admin_workspace_self_links');
     expect(page).toContain('participant_consent_evidence');
     expect(workspace).toContain('cmd_admin_record_consent');
     expect(workspace).toContain('p_consent_id: grantConsent');
     expect(workspace).toContain('provider_recorded: true');
+    expect(workspace).toContain('participantSelfProfiles');
   });
 
   it("preserves accessible labels and material failure/warning states", () => {

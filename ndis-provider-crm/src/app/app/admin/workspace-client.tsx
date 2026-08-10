@@ -53,6 +53,7 @@ type Data = {
   consents: Array<Record<string, unknown>>;
   availability: Array<Record<string, unknown>>;
   audit: Array<Record<string, unknown>>;
+  selfLinks?: Array<Record<string, unknown>>;
 };
 
 const isoTomorrow = () => new Date(Date.now() + 86400000).toISOString().slice(0, 16);
@@ -139,7 +140,6 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     args: Record<string, unknown>,
     result: NormalizedCommandResult,
   ): void {
-    const fingerprint = payloadFingerprint(args);
     transitionRecord(formKey, (rec) =>
       completeCommand(rec, {
         status: result.duplicate ? "duplicate" : "succeeded",
@@ -147,10 +147,6 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
         warnings: result.warnings,
       }),
     );
-    // Persist the payload fingerprint so the next submit can decide
-    // whether to reuse the current command ID (same logical command)
-    // or mint a new one (different intent).
-    setLastFingerprint((prev) => ({ ...prev, [formKey]: fingerprint }));
   }
 
   function transitionRecord(formKey: FormKey, updater: (rec: CommandRecord) => CommandRecord): void {
@@ -208,13 +204,13 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     setFormErrorsState((prev) => clearFormError(prev, formKey));
   }
 
-  async function call(formKey: FormKey, name: string, args: Record<string, unknown>): Promise<boolean> {
+  async function call(formKey: FormKey, name: string, args: Record<string, unknown>, visibleIntent?: Record<string, unknown>): Promise<boolean> {
     if (formLocksRef.current[formKey]) return false;
     formLocksRef.current[formKey] = true;
     setFormPendingState((prev) => setFormPending(prev, formKey, true));
     clearFormMessage(formKey);
     transitionRecord(formKey, beginCommand);
-    const fingerprint = payloadFingerprint(args);
+    const fingerprint = payloadFingerprint(visibleIntent ?? args);
     const lastFingerprintForForm = lastFingerprint[formKey] ?? null;
     const currentRecord = records[formKey];
     // A retry of the same logical command (same payload fingerprint
@@ -228,7 +224,8 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     // Capture the exact logical arguments before the RPC starts so a
     // rejection/throw can retry with the same command ID and payload.
     setLastFingerprint((prev) => ({ ...prev, [formKey]: fingerprint }));
-    setLastArgs((prev) => ({ ...prev, [formKey]: args }));
+    if (!reuseCommand) setLastArgs((prev) => ({ ...prev, [formKey]: args }));
+    if (formKey === FORM_KEYS.invite && !reuseCommand) setInviteFallbackUrl(null);
     try {
       const { data: result, error } = await supabase.rpc(name, { ...retryArgs, p_command_id: commandId });
       if (error) {
@@ -389,7 +386,7 @@ function Overview({ data, setTab }: { data: Data; setTab: (tab: string) => void 
   return <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{cards.map((card) => <button key={card.label} className="text-left" onClick={() => setTab(card.tab)}><Card className="h-full transition hover:ring-2 hover:ring-ring"><CardHeader><CardDescription>{card.label}</CardDescription><CardTitle className="text-3xl">{card.value}</CardTitle></CardHeader><CardContent><span className="text-sm text-muted-foreground">Open workspace →</span></CardContent></Card></button>)}</div>;
 }
 
-type FormCall = (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
+type FormCall = (formKey: FormKey, name: string, args: Record<string, unknown>, visibleIntent?: Record<string, unknown>) => Promise<boolean>;
 
 function Participants({
   data,
@@ -796,6 +793,11 @@ function Access({
   const participantAuthorities = consentParticipant
     ? data.authorities.filter((authority) => authority.participant_id === consentParticipant && authority.status === "active")
     : [];
+  const participantSelfProfiles = new Set(
+    (data.selfLinks ?? [])
+      .filter((link) => link.participant_id === consentParticipant && link.status === "active")
+      .map((link) => String(link.profile_id)),
+  );
   const renewPair = renewParticipant && renewRecipient
     ? currentConsentForPair(renewParticipant, renewRecipient)
     : null;
@@ -865,6 +867,15 @@ function Access({
                 p_effective_from: from.toISOString(),
                 p_effective_until: until.toISOString(),
                 p_payload: { source: "admin-workspace", provider_recorded: true },
+              }, {
+                participant: consentParticipant,
+                recipient: consentRecipient,
+                authoriser: consentAuthoriser,
+                basis: consentBasis,
+                authority: consentAuthorityId,
+                purpose: consentPurpose,
+                scope: consentScope,
+                evidence: consentEvidence,
               });
             }}
           >
@@ -898,7 +909,7 @@ function Access({
               <Field label="Participant authoriser">
                 <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
                   <option value="">Choose participant account</option>
-                  {data.identities.filter((i) => i.role === "participant").map((i) => {
+                  {data.identities.filter((i) => i.role === "participant" && participantSelfProfiles.has(String(i.profile_id))).map((i) => {
                     const label = labelLookup(String(i.profile_id));
                     return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
                   })}
@@ -961,6 +972,13 @@ function Access({
                 p_effective_from: from.toISOString(),
                 p_effective_until: until.toISOString(),
                 p_payload: { source: "admin-workspace", provider_recorded: true },
+              }, {
+                participant: renewParticipant,
+                recipient: renewRecipient,
+                expected: renewExpectedConsent || String(renewPair.id),
+                purpose: renewPurpose,
+                scope: renewScope,
+                evidence: renewEvidence,
               });
             }}
           >
@@ -1024,7 +1042,7 @@ function Access({
                 p_effective_from: from.toISOString(),
                 p_effective_until: new Date(until).toISOString(),
                 p_payload: { source: "admin-workspace" },
-              });
+              }, { consent: grantConsent });
             }}
           >
             <Field label="Consent evidence">
@@ -1148,6 +1166,12 @@ function Access({
                 p_effective_from: from.toISOString(),
                 p_effective_until: until.toISOString(),
                 p_payload: { source: "admin-workspace" },
+              }, {
+                participant: authorityParticipant,
+                representative: authorityProfile,
+                type: authorityType,
+                scope: authorityScope,
+                evidence,
               });
             }}
           >

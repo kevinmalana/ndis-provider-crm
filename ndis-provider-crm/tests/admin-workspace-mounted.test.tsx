@@ -28,7 +28,7 @@
  *      visibly reflects its own pending state via aria-busy.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 const routerMock = { refresh: vi.fn() };
@@ -89,10 +89,12 @@ const initialData = {
     { profile_id: "worker-1", full_name: "Wendy Worker", email: "worker@example.test", role: "worker", membership_id: "m-worker-1" },
     { profile_id: "ext-1", full_name: "Eli External", email: "external@example.test", role: "external" },
     { profile_id: "rep-1", full_name: "Rita Rep", email: "rep@example.test", role: "nominee" },
+    { profile_id: "participant-1", full_name: "Maya Account", email: "maya@example.test", role: "participant" },
   ],
   shifts: [],
   assignments: [],
   authorities: [],
+  selfLinks: [{ participant_id: "p-1", profile_id: "participant-1", status: "active" }],
   grants: [],
   consents: [],
   availability: [],
@@ -354,6 +356,22 @@ describe("mounted AdminWorkspace — invitation duplicate retry preserves the ac
     await clickByText(/^Issue invitation$/);
     await waitFor(() => expect((screen.getByLabelText("Selectable invitation URL") as HTMLInputElement).value).toContain("/invite/tok-denied"));
   });
+
+  it("clears the previous fallback when a genuinely new invite fails", async () => {
+    mockRpcSequence([{ status: "accepted", receipt_id: "r-first", invitation_id: "inv-first", token: "tok-first", role: "worker", email: "first@y.test" }]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Access");
+    const email = screen.getByLabelText("Email");
+    await act(async () => fireEvent.change(email, { target: { value: "first@y.test" } }));
+    await clickByText(/^Issue invitation$/);
+    await waitFor(() => expect((screen.getByLabelText("Selectable invitation URL") as HTMLInputElement).value).toContain("tok-first"));
+
+    rpcMock.mockRejectedValueOnce(new Error("second invite failed"));
+    await act(async () => fireEvent.change(email, { target: { value: "second@y.test" } }));
+    await clickByText(/^Issue invitation$/);
+    await waitFor(() => expect(screen.getByText(/Could not save: second invite failed/i)).toBeInTheDocument());
+    expect(screen.queryByLabelText("Selectable invitation URL")).not.toBeInTheDocument();
+  });
 });
 
 describe("mounted AdminWorkspace — duplicate warning is terminal and acknowledgement rotates", () => {
@@ -559,5 +577,102 @@ describe("mounted AdminWorkspace — consent record vs renew routes by current-l
     await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
     const grantArgs = rpcMock.mock.calls[1][1] as Record<string, unknown>;
     expect(grantArgs.p_consent_id).toBe("cons-rep");
+  });
+
+  it("reuses exact consent timestamps after reject→duplicate when visible intent is unchanged", async () => {
+    rpcMock.mockRejectedValueOnce(new Error("consent response lost"));
+    mockRpcSequence([{ status: "duplicate_returned", duplicate: true, receipt_id: "r-consent-retry", outcome: { consent_id: "cons-retry" } }]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Access");
+    await act(async () => {
+      const participants = screen.getAllByLabelText("Participant");
+      fireEvent.change(participants[0], { target: { value: "p-1" } });
+      fireEvent.change(screen.getAllByLabelText("External recipient")[0], { target: { value: "ext-1" } });
+      fireEvent.change(screen.getByLabelText("Consent basis"), { target: { value: "participant" } });
+      fireEvent.change(screen.getByLabelText("Participant authoriser"), { target: { value: "participant-1" } });
+      fireEvent.change(screen.getByLabelText("Purpose"), { target: { value: "consent retry" } });
+      fireEvent.change(screen.getAllByLabelText("Scope categories")[0], { target: { value: "service_summary" } });
+      fireEvent.change(screen.getAllByLabelText("Evidence reference")[0], { target: { value: "consent-retry-evidence" } });
+    });
+    await clickByRole("button", /^Record consent evidence$/);
+    await waitFor(() => expect(screen.getByText(/Could not save: consent response lost/i)).toBeInTheDocument());
+    const first = rpcMock.mock.calls[0][1] as Record<string, unknown>;
+    await clickByRole("button", /^Record consent evidence$/);
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    const retry = rpcMock.mock.calls[1][1] as Record<string, unknown>;
+    expect(retry.p_command_id).toBe(first.p_command_id);
+    expect(retry.p_effective_from).toBe(first.p_effective_from);
+    expect(retry.p_effective_until).toBe(first.p_effective_until);
+  });
+
+  it("reuses exact grant timestamps after a thrown RPC and duplicate response", async () => {
+    const dataWithConsent = {
+      ...initialData,
+      consents: [{ id: "cons-grant-retry", participant_id: "p-1", recipient_profile_id: "ext-1", purpose: "grant retry", scope_categories: ["service_summary"], status: "active", effective_from: "2026-08-01T00:00:00Z", effective_until: "2026-12-01T00:00:00Z", version: 1, superseded_by: null }],
+    };
+    rpcMock.mockImplementationOnce(() => { throw new Error("grant response lost"); });
+    mockRpcSequence([{ status: "duplicate_returned", duplicate: true, receipt_id: "r-grant-retry", outcome: { grant_id: "grant-retry" } }]);
+    render(<AdminWorkspace organisation={organisation} initialData={dataWithConsent} />);
+    await clickTab("Access");
+    await act(async () => fireEvent.change(screen.getByLabelText("Consent evidence"), { target: { value: "cons-grant-retry" } }));
+    await clickByRole("button", /^Create view-only grant$/);
+    await waitFor(() => expect(screen.getByText(/Could not save: grant response lost/i)).toBeInTheDocument());
+    const first = rpcMock.mock.calls[0][1] as Record<string, unknown>;
+    await clickByRole("button", /^Create view-only grant$/);
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    const retry = rpcMock.mock.calls[1][1] as Record<string, unknown>;
+    expect(retry.p_command_id).toBe(first.p_command_id);
+    expect(retry.p_effective_from).toBe(first.p_effective_from);
+    expect(retry.p_effective_until).toBe(first.p_effective_until);
+  });
+
+  it("reuses exact authority timestamps after reject→duplicate when visible intent is unchanged", async () => {
+    rpcMock.mockRejectedValueOnce(new Error("authority response lost"));
+    mockRpcSequence([{ status: "duplicate_returned", duplicate: true, receipt_id: "r-authority-retry", outcome: { authority_id: "authority-retry" } }]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Access");
+    await act(async () => {
+      const participants = screen.getAllByLabelText("Participant");
+      fireEvent.change(participants.at(-1) as HTMLElement, { target: { value: "p-1" } });
+      fireEvent.change(screen.getByLabelText("Representative account"), { target: { value: "rep-1" } });
+      fireEvent.change(screen.getByLabelText("Authority type"), { target: { value: "plan_nominee" } });
+      fireEvent.change(screen.getAllByLabelText("Scope categories").at(-1) as HTMLElement, { target: { value: "service_summary" } });
+      fireEvent.change(screen.getAllByLabelText("Evidence reference").at(-1) as HTMLElement, { target: { value: "authority-retry-evidence" } });
+    });
+    await clickByRole("button", /^Record representative authority$/);
+    await waitFor(() => expect(screen.getByText(/Could not save: authority response lost/i)).toBeInTheDocument());
+    const first = rpcMock.mock.calls[0][1] as Record<string, unknown>;
+    await clickByRole("button", /^Record representative authority$/);
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    const retry = rpcMock.mock.calls[1][1] as Record<string, unknown>;
+    expect(retry.p_command_id).toBe(first.p_command_id);
+    expect(retry.p_effective_from).toBe(first.p_effective_from);
+    expect(retry.p_effective_until).toBe(first.p_effective_until);
+  });
+
+  it("offers participant authorisers only from active self-links for the selected participant", async () => {
+    const scopedData = {
+      ...initialData,
+      participants: [
+        ...initialData.participants,
+        { id: "p-2", first_name: "Other", last_initial: "Q", created_at: "2026-08-01T00:00:00Z" },
+      ],
+      identities: [
+        ...initialData.identities,
+        { profile_id: "participant-2", full_name: "Other Account", email: "other@example.test", role: "participant" },
+      ],
+      selfLinks: [
+        { participant_id: "p-1", profile_id: "participant-1", status: "active" },
+        { participant_id: "p-2", profile_id: "participant-2", status: "active" },
+      ],
+    };
+    render(<AdminWorkspace organisation={organisation} initialData={scopedData} />);
+    await clickTab("Access");
+    await act(async () => {
+      fireEvent.change(screen.getAllByLabelText("Participant")[0], { target: { value: "p-1" } });
+    });
+    const authoriser = screen.getByLabelText("Participant authoriser");
+    expect(within(authoriser).getByRole("option", { name: "Maya Account" })).toBeInTheDocument();
+    expect(within(authoriser).queryByRole("option", { name: "Other Account" })).not.toBeInTheDocument();
   });
 });
