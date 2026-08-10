@@ -80,6 +80,25 @@ export function isTerminal(rec: CommandRecord): boolean {
   return rec.status === "succeeded" || rec.status === "duplicate";
 }
 
+/**
+ * Decide whether the command ID should rotate now that the user has
+ * acknowledged all of the warnings tied to this command's result.
+ *
+ * The command ID stays stable while warnings remain unacknowledged so
+ * a transport-uncertain retry returns the same result. Once every
+ * warning has been acknowledged, the next submission is a genuine
+ * new intent and a fresh command ID is minted.
+ */
+export function shouldRotateAfterAck(
+  rec: CommandRecord,
+  acks: WarningAcknowledgement[],
+): boolean {
+  if (rec.status !== "succeeded") return false;
+  if (rec.warnings.length === 0) return false;
+  if (!rec.resultKey) return false;
+  return allWarningsAcknowledged(acks, rec.resultKey, rec.warnings);
+}
+
 export type PreservedResult = {
   resultKey: string | null;
   warnings: string[];
@@ -88,6 +107,100 @@ export type PreservedResult = {
 
 export function preserveResult(rec: CommandRecord): PreservedResult {
   return { resultKey: rec.resultKey, warnings: rec.warnings, status: rec.status };
+}
+
+export type CommandResultStatus = "accepted" | "duplicate" | "errored";
+
+export type NormalizedCommandResult = {
+  status: CommandResultStatus;
+  duplicate: boolean;
+  receiptId: string;
+  /** The shift_id / consent_id / grant_id of the effective result. */
+  resultKey: string | null;
+  warnings: string[];
+  /** Invitation-only: copy-link token (always actor-bound via the receipt). */
+  token: string | null;
+  /** Invitation-only: the original invitation row id. */
+  invitationId: string | null;
+};
+
+/**
+ * Normalize accepted and duplicate RPC response shapes so the UI can
+ * react identically regardless of which branch the server took.
+ *
+ * Server shape (accepted):
+ *   { status: 'accepted', receipt_id, shift_id, warnings, token, … }
+ * Server shape (duplicate_returned):
+ *   { status: 'duplicate_returned', receipt_id, outcome: { shift_id,
+ *     warnings, token, … } }
+ *
+ * After normalization the UI can read resultKey / warnings / token
+ * from the same fields whether the command was a fresh success or a
+ * transport-uncertain retry that hit a duplicate receipt.
+ */
+export function normalizeCommandResult(payload: Record<string, unknown>): NormalizedCommandResult {
+  const rawStatus = typeof payload.status === "string" ? payload.status : "accepted";
+  const duplicate = rawStatus === "duplicate_returned";
+  const outcome = (payload.outcome ?? {}) as Record<string, unknown>;
+
+  const candidateResultKey = (payload.shift_id ??
+    payload.consent_id ??
+    payload.grant_id ??
+    outcome.shift_id ??
+    outcome.consent_id ??
+    outcome.grant_id ??
+    null) as string | null;
+
+  const warnings = (Array.isArray(payload.warnings)
+    ? (payload.warnings as unknown[])
+    : Array.isArray(outcome.warnings)
+      ? (outcome.warnings as unknown[])
+      : []) as string[];
+
+  return {
+    status: duplicate ? "duplicate" : "accepted",
+    duplicate,
+    receiptId: typeof payload.receipt_id === "string" ? payload.receipt_id : "",
+    resultKey: candidateResultKey,
+    warnings,
+    token: (payload.token ?? outcome.token ?? null) as string | null,
+    invitationId: (payload.invitation_id ?? outcome.invitation_id ?? null) as string | null,
+  };
+}
+
+export type FormPendingMap = Record<string, boolean>;
+export type FormErrorMap = Record<string, string | null>;
+
+export function initialFormPending(): FormPendingMap {
+  return {};
+}
+export function initialFormErrors(): FormErrorMap {
+  return {};
+}
+export function setFormPending(
+  prev: FormPendingMap,
+  formKey: string,
+  value: boolean,
+): FormPendingMap {
+  if (value === Boolean(prev[formKey])) return prev;
+  return { ...prev, [formKey]: value };
+}
+export function setFormError(
+  prev: FormErrorMap,
+  formKey: string,
+  value: string | null,
+): FormErrorMap {
+  if (value === (prev[formKey] ?? null)) return prev;
+  return { ...prev, [formKey]: value };
+}
+export function clearFormError(
+  prev: FormErrorMap,
+  formKey: string,
+): FormErrorMap {
+  if (!prev[formKey]) return prev;
+  const next = { ...prev };
+  delete next[formKey];
+  return next;
 }
 
 export type WarningAcknowledgement = {
@@ -223,6 +336,46 @@ export function describeWarning(warningKey: string): WarningHumanLabel {
     warningKey,
     message: WARNING_LABELS[warningKey] ?? "Review the roster warning before treating this shift as confirmed.",
   };
+}
+
+/**
+ * Stable fingerprint of a command's logical payload. Used to decide
+ * whether a new submission is a transport-uncertain retry (same
+ * payload → reuse command ID) or a genuinely new intent (different
+ * payload → rotate command ID).
+ */
+export type PayloadFingerprint = string;
+
+export function payloadFingerprint(args: Record<string, unknown>): PayloadFingerprint {
+  const stripped: Record<string, unknown> = {};
+  for (const key of Object.keys(args).sort()) {
+    if (key === "p_command_id" || key === "p_payload") continue;
+    stripped[key] = args[key];
+  }
+  return JSON.stringify(stripped);
+}
+
+/**
+ * Decide whether the next submission should reuse the current command
+ * ID. Reuse when the payload fingerprint matches the previous
+ * submission's fingerprint — a transport-uncertain retry (same
+ * payload, status pending/errored) returns the original outcome
+ * through duplicate_returned; a re-click with the same form values
+ * after a terminal success also reuses the command ID so the user
+ * gets the same result rather than a duplicate row. A changed
+ * payload fingerprint mints a fresh command ID.
+ */
+export function shouldReuseCommandId(
+  rec: CommandRecord,
+  fingerprint: PayloadFingerprint,
+  lastFingerprint: PayloadFingerprint | null,
+): boolean {
+  if (lastFingerprint === null) return false;
+  if (lastFingerprint !== fingerprint) return false;
+  // Same payload as the previous submission: reuse, regardless of
+  // whether the prior result was transport-uncertain or already
+  // terminal.
+  return rec.status !== "idle";
 }
 
 export type CommandLifecycle = {

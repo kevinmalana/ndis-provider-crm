@@ -6,19 +6,26 @@ import {
   allWarningsAcknowledged,
   beginCommand,
   buildIdentityLabels,
+  clearFormError,
   completeCommand,
   createCommand,
   describeRecipient,
   describeWarning,
   failCommand,
+  initialFormErrors,
+  initialFormPending,
   initialReviewDueState,
   isAcknowledged,
   labelFor,
   nextCommandId,
+  normalizeCommandResult,
   preserveResult,
   revokeAcknowledgement,
   setCreateDue,
+  setFormError,
+  setFormPending,
   setUpdateDue,
+  shouldRotateAfterAck,
   simulateRetryLifecycle,
   type CommandRecord,
   type IdentityRow,
@@ -205,5 +212,143 @@ describe("workspace state — warning human labels", () => {
     const description = describeWarning("unknown_warning");
     expect(description.warningKey).toBe("unknown_warning");
     expect(description.message.toLowerCase()).toContain("review");
+  });
+});
+
+describe("workspace state — command ID rotates only after ack / new intent", () => {
+  it("keeps the command ID while warnings remain unacknowledged", () => {
+    let rec: CommandRecord = createCommand({ commandId: "shift-1" });
+    rec = beginCommand(rec);
+    rec = completeCommand(rec, {
+      status: "succeeded",
+      resultKey: "shift-1",
+      warnings: ["worker_overlap", "outside_published_availability"],
+    });
+    const acks: WarningAcknowledgement[] = [];
+    expect(shouldRotateAfterAck(rec, acks)).toBe(false);
+    expect(
+      shouldRotateAfterAck(
+        rec,
+        acknowledge(acks, "shift-1", ["worker_overlap"], "2026-08-07T10:00:00Z"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rotates the command ID once every warning is acknowledged", () => {
+    let rec: CommandRecord = createCommand({ commandId: "shift-1" });
+    rec = beginCommand(rec);
+    rec = completeCommand(rec, {
+      status: "succeeded",
+      resultKey: "shift-1",
+      warnings: ["worker_overlap", "outside_published_availability"],
+    });
+    const acks = acknowledge(
+      [],
+      "shift-1",
+      ["worker_overlap", "outside_published_availability"],
+      "2026-08-07T10:00:00Z",
+    );
+    expect(shouldRotateAfterAck(rec, acks)).toBe(true);
+  });
+
+  it("returns false for terminal records that never had warnings", () => {
+    let rec: CommandRecord = createCommand({ commandId: "shift-1" });
+    rec = beginCommand(rec);
+    rec = completeCommand(rec, { status: "succeeded", resultKey: "shift-1", warnings: [] });
+    expect(shouldRotateAfterAck(rec, [])).toBe(false);
+  });
+});
+
+describe("workspace state — normalizeCommandResult", () => {
+  it("extracts resultKey / warnings / token from an accepted response shape", () => {
+    const accepted = {
+      status: "accepted",
+      receipt_id: "r-1",
+      shift_id: "shift-1",
+      warnings: ["worker_overlap"],
+      token: "tok-1",
+      invitation_id: "inv-1",
+    };
+    const result = normalizeCommandResult(accepted);
+    expect(result).toEqual({
+      status: "accepted",
+      duplicate: false,
+      receiptId: "r-1",
+      resultKey: "shift-1",
+      warnings: ["worker_overlap"],
+      token: "tok-1",
+      invitationId: "inv-1",
+    });
+  });
+
+  it("extracts the same fields from a duplicate_returned outcome shape", () => {
+    const duplicate = {
+      status: "duplicate_returned",
+      duplicate: true,
+      receipt_id: "r-1",
+      outcome: {
+        shift_id: "shift-1",
+        warnings: ["worker_overlap"],
+        token: "tok-1",
+        invitation_id: "inv-1",
+      },
+    };
+    const result = normalizeCommandResult(duplicate);
+    expect(result).toEqual({
+      status: "duplicate",
+      duplicate: true,
+      receiptId: "r-1",
+      resultKey: "shift-1",
+      warnings: ["worker_overlap"],
+      token: "tok-1",
+      invitationId: "inv-1",
+    });
+  });
+
+  it("returns an empty resultKey and an empty warning list when the response is empty", () => {
+    const empty = normalizeCommandResult({});
+    expect(empty).toEqual({
+      status: "accepted",
+      duplicate: false,
+      receiptId: "",
+      resultKey: null,
+      warnings: [],
+      token: null,
+      invitationId: null,
+    });
+  });
+
+  it("preserves the original invitation token on duplicate retry so the copy link stays recoverable for the issuing actor", () => {
+    const duplicate = normalizeCommandResult({
+      status: "duplicate_returned",
+      receipt_id: "r-invite",
+      outcome: { invitation_id: "inv-1", token: "tok-original", email: "x@y.test" },
+    });
+    expect(duplicate.token).toBe("tok-original");
+    expect(duplicate.invitationId).toBe("inv-1");
+  });
+});
+
+describe("workspace state — per-form pending / error helpers", () => {
+  it("starts with empty maps so every form has no inherited pending or error", () => {
+    expect(initialFormPending()).toEqual({});
+    expect(initialFormErrors()).toEqual({});
+  });
+
+  it("sets and clears per-form pending without disturbing other forms", () => {
+    const before = initialFormPending();
+    const pendingShift = setFormPending(before, "create-shift", true);
+    expect(pendingShift["create-shift"]).toBe(true);
+    expect(pendingShift["set-availability"]).toBeUndefined();
+    const released = setFormPending(pendingShift, "create-shift", false);
+    expect(released["create-shift"]).toBe(false);
+  });
+
+  it("stores and clears per-form error messages independently", () => {
+    const seeded = setFormError(initialFormErrors(), "create-shift", "Could not save");
+    expect(seeded["create-shift"]).toBe("Could not save");
+    const cleared = clearFormError(seeded, "create-shift");
+    expect(cleared["create-shift"]).toBeUndefined();
+    expect(cleared).not.toBe(seeded);
   });
 });

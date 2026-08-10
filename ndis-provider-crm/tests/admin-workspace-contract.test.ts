@@ -19,7 +19,7 @@ describe("admin workspace UI contract", () => {
     expect(workspace).toContain("<Label htmlFor={fieldId}");
     expect(workspace).toContain('role="alert"');
     expect(workspace).toContain("Could not save:");
-    expect(workspace).toContain("pendingRef");
+    expect(workspace).toContain("formLocksRef");
     expect(workspace).toContain("navigator.clipboard");
   });
 

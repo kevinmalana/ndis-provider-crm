@@ -14,17 +14,28 @@ import {
   allWarningsAcknowledged,
   beginCommand,
   buildIdentityLabels,
+  clearFormError,
   completeCommand,
   createCommand,
   describeWarning,
   failCommand,
+  initialFormErrors,
+  initialFormPending,
   initialReviewDueState,
   isAcknowledged,
   labelFor,
+  normalizeCommandResult,
+  payloadFingerprint,
   setCreateDue,
+  setFormError,
+  setFormPending,
   setUpdateDue,
+  shouldReuseCommandId,
+  shouldRotateAfterAck,
   type CommandRecord,
   type IdentityRow,
+  type NormalizedCommandResult,
+  type PayloadFingerprint,
   type ReviewDueState,
   type WarningAcknowledgement,
 } from "./workspace-state";
@@ -68,6 +79,14 @@ function freshFormKeys(): Record<FormKey, string> {
   return Object.fromEntries(keys.map((k) => [k, crypto.randomUUID()])) as Record<FormKey, string>;
 }
 
+function freshRecords(): Record<FormKey, CommandRecord> {
+  const init: Partial<Record<FormKey, CommandRecord>> = {};
+  for (const key of Object.values(FORM_KEYS)) {
+    init[key] = createCommand({ commandId: crypto.randomUUID() });
+  }
+  return init as Record<FormKey, CommandRecord>;
+}
+
 export function AdminWorkspace({ organisation, initialData }: { organisation: Organisation; initialData: Data }) {
   // Data flows through props so router.refresh() re-renders the
   // workspace with newly reconciled rows. Only client-specific state
@@ -76,19 +95,23 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
   const router = useRouter();
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [tab, setTab] = useState("overview");
-  const [message, setMessage] = useState("");
-  const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
+
+  // Per-form pending / error state. Each form has its own lock so
+  // unrelated forms remain usable while one is in flight. Every
+  // submitting control visibly reflects its own state via the
+  // disabled prop + aria-busy.
+  const [formPending, setFormPendingState] = useState<Record<string, boolean>>(initialFormPending);
+  const [formErrors, setFormErrorsState] = useState<Record<string, string | null>>(initialFormErrors);
+  const formLocksRef = useRef<Record<string, boolean>>({});
 
   const [commandIds, setCommandIds] = useState<Record<FormKey, string>>(() => freshFormKeys());
-  const [records, setRecords] = useState<Record<FormKey, CommandRecord>>(() => {
-    const init: Partial<Record<FormKey, CommandRecord>> = {};
-    for (const key of Object.values(FORM_KEYS)) {
-      init[key] = createCommand({ commandId: crypto.randomUUID() });
-    }
-    return init as Record<FormKey, CommandRecord>;
-  });
+  const [records, setRecords] = useState<Record<FormKey, CommandRecord>>(() => freshRecords());
   const [acks, setAcks] = useState<WarningAcknowledgement[]>([]);
+  const acksRef = useRef<WarningAcknowledgement[]>(acks);
+  acksRef.current = acks;
+  const [lastFingerprint, setLastFingerprint] = useState<Record<FormKey, PayloadFingerprint | null>>(
+    () => Object.fromEntries(Object.values(FORM_KEYS).map((k) => [k, null])) as Record<FormKey, PayloadFingerprint | null>,
+  );
 
   const workers = data.identities.filter((m) => m.role === "worker");
   const identityLabels = useMemo(
@@ -107,85 +130,144 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     return nextId;
   }
 
+  function recordCommandResult(
+    formKey: FormKey,
+    args: Record<string, unknown>,
+    result: NormalizedCommandResult,
+  ): void {
+    const fingerprint = payloadFingerprint(args);
+    transitionRecord(formKey, (rec) =>
+      completeCommand(rec, {
+        status: result.duplicate ? "duplicate" : "succeeded",
+        resultKey: result.resultKey,
+        warnings: result.warnings,
+      }),
+    );
+    // Persist the payload fingerprint so the next submit can decide
+    // whether to reuse the current command ID (same logical command)
+    // or mint a new one (different intent).
+    setLastFingerprint((prev) => ({ ...prev, [formKey]: fingerprint }));
+  }
+
   function transitionRecord(formKey: FormKey, updater: (rec: CommandRecord) => CommandRecord): void {
     setRecords((prev) => ({ ...prev, [formKey]: updater(prev[formKey]) }));
   }
 
+  function isFormPending(formKey: FormKey): boolean {
+    return Boolean(formPending[formKey]);
+  }
+
+  function formError(formKey: FormKey): string | null {
+    return formErrors[formKey] ?? null;
+  }
+
+  // Apply a normalized command result to component state. Pulls
+  // resultKey / warnings / token from the appropriate location for
+  // both accepted and duplicate_returned responses so warnings
+  // survive transport-uncertain retries unchanged.
+  function applyResult(formKey: FormKey, args: Record<string, unknown>, result: NormalizedCommandResult): void {
+    recordCommandResult(formKey, args, result);
+
+    if (formKey === FORM_KEYS.invite && result.token) {
+      const url = `${window.location.origin}/invite/${result.token}`;
+      // Best-effort copy. Fall back to a selectable message when the
+      // browser denies clipboard access.
+      navigator.clipboard
+        ?.writeText?.(url)
+        .then(() => setFormMessage(formKey, "Invitation created. The single-use link was copied; share it through the provider’s approved channel."))
+        .catch(() =>
+          setFormMessage(
+            formKey,
+            `Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`,
+          ),
+        );
+    }
+  }
+
+  function setFormMessage(formKey: FormKey, message: string): void {
+    setFormErrorsState((prev) => setFormError(prev, formKey, message));
+  }
+
+  function clearFormMessage(formKey: FormKey): void {
+    setFormErrorsState((prev) => clearFormError(prev, formKey));
+  }
+
   async function call(formKey: FormKey, name: string, args: Record<string, unknown>): Promise<boolean> {
-    if (pendingRef.current) return false;
-    pendingRef.current = true;
-    setPending(true);
-    setMessage("Saving securely…");
+    if (formLocksRef.current[formKey]) return false;
+    formLocksRef.current[formKey] = true;
+    setFormPendingState((prev) => setFormPending(prev, formKey, true));
+    clearFormMessage(formKey);
     transitionRecord(formKey, beginCommand);
-    const commandId = currentCommandId(formKey);
+    const fingerprint = payloadFingerprint(args);
+    const lastFingerprintForForm = lastFingerprint[formKey] ?? null;
+    const currentRecord = records[formKey];
+    // A retry of the same logical command (same payload fingerprint
+    // while still transport-uncertain) reuses the existing command
+    // ID; a changed payload forces a fresh command ID.
+    const commandId = shouldReuseCommandId(currentRecord, fingerprint, lastFingerprintForForm)
+      ? currentCommandId(formKey)
+      : renewCommandId(formKey);
     try {
       const { data: result, error } = await supabase.rpc(name, { ...args, p_command_id: commandId });
       if (error) {
-        setMessage(`Could not save: ${error.message.replace(/^.*?: /, "")}`);
+        setFormMessage(formKey, `Could not save: ${error.message.replace(/^.*?: /, "")}`);
         transitionRecord(formKey, failCommand);
         return false;
       }
-      const payload = (result ?? {}) as {
-        token?: string;
-        warnings?: string[];
-        status?: "accepted" | "duplicate_returned";
-        shift_id?: string;
-        consent_id?: string;
-        grant_id?: string;
-        [k: string]: unknown;
-      };
-      const status = payload.status;
+      const payload = (result ?? {}) as Record<string, unknown>;
+      const status = payload.status as "accepted" | "duplicate_returned" | undefined;
       const isDuplicate = status === "duplicate_returned";
+      const normalized = normalizeCommandResult(payload);
 
-      if (name === "cmd_admin_invite" && payload.token) {
-        const url = `${window.location.origin}/invite/${payload.token}`;
-        try {
-          await navigator.clipboard.writeText(url);
-          setMessage("Invitation created. The single-use link was copied; share it through the provider’s approved channel.");
-        } catch {
-          setMessage(`Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`);
-        }
-        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey: null, warnings: [] }));
-        renewCommandId(formKey);
-        void router.refresh();
-      } else if (name === "cmd_admin_create_shift" && Array.isArray(payload.warnings) && payload.warnings.length > 0 && typeof payload.shift_id === "string") {
-        const resultKey = payload.shift_id;
-        const warningKeys = payload.warnings;
-        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey, warnings: warningKeys }));
-        setMessage(
+      if (name === "cmd_admin_create_shift" && normalized.warnings.length > 0 && normalized.resultKey) {
+        setFormMessage(
+          formKey,
           isDuplicate
             ? "This command was already applied; the original shift result with warnings is shown."
             : "Shift created, but review the roster warnings before treating it as confirmed.",
         );
-        // Keep the command ID stable until warnings are acknowledged so a
-        // transport-uncertain retry returns the same shift result.
+        applyResult(formKey, args, normalized);
         void router.refresh();
-      } else {
-        transitionRecord(formKey, (rec) => completeCommand(rec, { status: isDuplicate ? "duplicate" : "succeeded", resultKey: null, warnings: [] }));
-        setMessage(
-          isDuplicate
-            ? "This command was already applied; the original result was returned."
-            : "Saved and added to the audit timeline.",
-        );
-        renewCommandId(formKey);
-        void router.refresh();
+        return true;
       }
+
+      if (isDuplicate) {
+        setFormMessage(formKey, "This command was already applied; the original result was returned.");
+      } else {
+        setFormMessage(formKey, "Saved and added to the audit timeline.");
+      }
+      applyResult(formKey, args, normalized);
+      void router.refresh();
       return true;
     } catch (error) {
-      setMessage(`Could not save: ${error instanceof Error ? error.message : "connection failed"}`);
+      setFormMessage(formKey, `Could not save: ${error instanceof Error ? error.message : "connection failed"}`);
       transitionRecord(formKey, failCommand);
       return false;
     } finally {
-      pendingRef.current = false;
-      setPending(false);
+      formLocksRef.current[formKey] = false;
+      setFormPendingState((prev) => setFormPending(prev, formKey, false));
     }
   }
 
+  // After a warning is acknowledged, decide whether the command ID
+  // can rotate. Ack is preserved across refresh because it lives in
+  // client state.
   function acknowledgeWarning(resultKey: string, warningKey: string, acknowledged: boolean): void {
-    if (acknowledged) {
-      setAcks((prev) => acknowledge(prev, resultKey, [warningKey], new Date().toISOString()));
-    } else {
-      setAcks((prev) => prev.filter((ack) => !(ack.resultKey === resultKey && ack.warningKey === warningKey)));
+    const at = new Date().toISOString();
+    const nextAcks = acknowledged
+      ? acknowledge(acksRef.current, resultKey, [warningKey], at)
+      : acksRef.current.filter((ack) => !(ack.resultKey === resultKey && ack.warningKey === warningKey));
+    acksRef.current = nextAcks;
+    setAcks(nextAcks);
+    // Once every warning for this result is acknowledged, the next
+    // submission is a genuine new intent and a fresh command ID is
+    // minted. Until then the ID stays stable so transport-uncertain
+    // retries return the same result.
+    for (const key of Object.values(FORM_KEYS)) {
+      const rec = records[key];
+      if (rec.resultKey === resultKey && shouldRotateAfterAck(rec, nextAcks)) {
+        renewCommandId(key);
+      }
     }
   }
 
@@ -206,7 +288,6 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
       <nav aria-label="Admin workspace sections" className="flex flex-wrap gap-2 border-b pb-3">
         {["overview", "participants", "roster", "access", "audit"].map((item) => <Button key={item} variant={tab === item ? "default" : "outline"} onClick={() => setTab(item)} aria-current={tab === item ? "page" : undefined}>{item[0].toUpperCase() + item.slice(1)}</Button>)}
       </nav>
-      {message ? <p role="status" className="rounded-md border border-info/40 bg-info/10 px-3 py-2 text-sm">{message}</p> : null}
       {pendingWarnings.map(({ resultKey, warnings: warningKeys }) => {
         const allAck = allWarningsAcknowledged(acks, resultKey, warningKeys);
         return (
@@ -249,7 +330,8 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
           data={data}
           organisationId={organisation.id}
           call={call}
-          pending={pending}
+          isPending={isFormPending}
+          formError={formError}
         />
       ) : null}
       {tab === "roster" ? (
@@ -258,7 +340,8 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
           workers={workers}
           organisationId={organisation.id}
           call={call}
-          pending={pending}
+          isPending={isFormPending}
+          formError={formError}
         />
       ) : null}
       {tab === "access" ? (
@@ -267,7 +350,8 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
           organisationId={organisation.id}
           actorRole={organisation.role}
           call={call}
-          pending={pending}
+          isPending={isFormPending}
+          formError={formError}
           privacyFallback={PRIVACY_SAFE_RECIPIENT_FALLBACK}
           labelLookup={(profileId) => labelFor(identityLabels, profileId)}
         />
@@ -282,16 +366,20 @@ function Overview({ data, setTab }: { data: Data; setTab: (tab: string) => void 
   return <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{cards.map((card) => <button key={card.label} className="text-left" onClick={() => setTab(card.tab)}><Card className="h-full transition hover:ring-2 hover:ring-ring"><CardHeader><CardDescription>{card.label}</CardDescription><CardTitle className="text-3xl">{card.value}</CardTitle></CardHeader><CardContent><span className="text-sm text-muted-foreground">Open workspace →</span></CardContent></Card></button>)}</div>;
 }
 
+type FormCall = (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
+
 function Participants({
   data,
   organisationId,
   call,
-  pending,
+  isPending,
+  formError,
 }: {
   data: Data;
   organisationId: string;
-  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
-  pending?: boolean;
+  call: FormCall;
+  isPending: (formKey: FormKey) => boolean;
+  formError: (formKey: FormKey) => string | null;
 }) {
   const [firstName, setFirstName] = useState("");
   const [lastInitial, setLastInitial] = useState("");
@@ -311,6 +399,11 @@ function Participants({
             className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
+              // The form values are intentionally preserved across
+              // successful submissions; the user signals "new
+              // submission" by changing the fields or clicking reset.
+              // A transport-uncertain retry therefore sends the same
+              // arguments with the same command ID.
               void call(FORM_KEYS.createParticipant, "cmd_admin_create_participant", {
                 p_organisation_id: organisationId,
                 p_first_name: firstName,
@@ -319,9 +412,6 @@ function Participants({
                 p_review_due_at: new Date(dueState.createDue).toISOString(),
                 p_payload: { source: "admin-workspace" },
               });
-              setFirstName("");
-              setLastInitial("");
-              setCritical("");
             }}
           >
             <Field label="First name">
@@ -347,7 +437,8 @@ function Participants({
                 onChange={(e) => setDueState((prev) => setCreateDue(prev, e.target.value))}
               />
             </Field>
-            <Button type="submit" disabled={pending}>Create secure record</Button>
+            <Button type="submit" disabled={isPending(FORM_KEYS.createParticipant)} aria-busy={isPending(FORM_KEYS.createParticipant)}>Create secure record</Button>
+            {formError(FORM_KEYS.createParticipant) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.createParticipant)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -384,7 +475,6 @@ function Participants({
                 p_review_due_at: new Date(dueState.updateDue).toISOString(),
                 p_payload: { source: "admin-workspace" },
               });
-              setUpdatedCritical("");
             }}
           >
             <Field label="Participant to review">
@@ -409,7 +499,8 @@ function Participants({
                 onChange={(e) => setDueState((prev) => setUpdateDue(prev, e.target.value))}
               />
             </Field>
-            <Button type="submit" disabled={pending}>Update critical handoff</Button>
+            <Button type="submit" disabled={isPending(FORM_KEYS.updateCriticalInfo)} aria-busy={isPending(FORM_KEYS.updateCriticalInfo)}>Update critical handoff</Button>
+            {formError(FORM_KEYS.updateCriticalInfo) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.updateCriticalInfo)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -422,13 +513,15 @@ function Roster({
   workers,
   organisationId,
   call,
-  pending,
+  isPending,
+  formError,
 }: {
   data: Data;
   workers: Array<Record<string, unknown>>;
   organisationId: string;
-  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
-  pending?: boolean;
+  call: FormCall;
+  isPending: (formKey: FormKey) => boolean;
+  formError: (formKey: FormKey) => string | null;
 }) {
   const [participant, setParticipant] = useState("");
   const [worker, setWorker] = useState("");
@@ -453,6 +546,10 @@ function Roster({
             className="grid gap-4 md:grid-cols-2"
             onSubmit={(e) => {
               e.preventDefault();
+              // Form values preserved across submissions — the next
+              // click sends the same logical command with the same
+              // command ID, returning duplicate_returned on the
+              // server side until the user signals new intent.
               void call(FORM_KEYS.createShift, "cmd_admin_create_shift", {
                 p_organisation_id: organisationId,
                 p_participant_id: participant,
@@ -462,7 +559,6 @@ function Roster({
                 p_reason: reason,
                 p_payload: { source: "admin-workspace" },
               });
-              setReason("");
             }}
           >
             <Field label="Participant">
@@ -487,8 +583,9 @@ function Roster({
               <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Routine roster / cover" />
             </Field>
             <div className="flex items-end">
-              <Button type="submit" disabled={pending}>Create shift</Button>
+              <Button type="submit" disabled={isPending(FORM_KEYS.createShift)} aria-busy={isPending(FORM_KEYS.createShift)}>Create shift</Button>
             </div>
+            {formError(FORM_KEYS.createShift) ? <p role="status" className="text-xs text-info-foreground md:col-span-2">{formError(FORM_KEYS.createShift)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -510,7 +607,6 @@ function Roster({
                 p_note: availabilityNote,
                 p_payload: { source: "admin-workspace" },
               });
-              setAvailabilityNote("");
             }}
           >
             <Field label="Worker">
@@ -529,8 +625,9 @@ function Roster({
               <Input required type="datetime-local" value={availabilityUntil} onChange={(e) => setAvailabilityUntil(e.target.value)} />
             </Field>
             <div>
-              <Button type="submit" disabled={pending} variant="outline">Publish availability</Button>
+              <Button type="submit" disabled={isPending(FORM_KEYS.setAvailability)} aria-busy={isPending(FORM_KEYS.setAvailability)} variant="outline">Publish availability</Button>
             </div>
+            {formError(FORM_KEYS.setAvailability) ? <p role="status" className="text-xs text-info-foreground md:col-span-2">{formError(FORM_KEYS.setAvailability)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -555,7 +652,6 @@ function Roster({
                 p_reason: reassignReason,
                 p_payload: { source: "admin-workspace" },
               });
-              setReassignReason("");
             }}
           >
             <Field label="Shift">
@@ -574,8 +670,9 @@ function Roster({
               <Input required value={reassignReason} onChange={(e) => setReassignReason(e.target.value)} placeholder="Cover confirmed with worker" />
             </Field>
             <div className="flex items-end">
-              <Button type="submit" variant="outline">Reassign shift</Button>
+              <Button type="submit" disabled={isPending(FORM_KEYS.reassignShift)} aria-busy={isPending(FORM_KEYS.reassignShift)} variant="outline">Reassign shift</Button>
             </div>
+            {formError(FORM_KEYS.reassignShift) ? <p role="status" className="text-xs text-info-foreground md:col-span-2">{formError(FORM_KEYS.reassignShift)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -614,15 +711,17 @@ function Access({
   organisationId,
   actorRole,
   call,
-  pending,
+  isPending,
+  formError,
   privacyFallback,
   labelLookup,
 }: {
   data: Data;
   organisationId: string;
   actorRole: string;
-  call: (formKey: FormKey, name: string, args: Record<string, unknown>) => Promise<boolean>;
-  pending?: boolean;
+  call: FormCall;
+  isPending: (formKey: FormKey) => boolean;
+  formError: (formKey: FormKey) => string | null;
   privacyFallback: string;
   labelLookup: (profileId: string) => { hasLabel: true; label: string; role: string } | { hasLabel: false; label: string; role: null };
 }) {
@@ -633,20 +732,44 @@ function Access({
   const [authorityType, setAuthorityType] = useState("plan_nominee");
   const [authorityScope, setAuthorityScope] = useState("upcoming_visits,service_summary");
   const [selfEvidence, setSelfEvidence] = useState("");
-  const [grantConsent, setGrantConsent] = useState("");
-  const [consentBasis, setConsentBasis] = useState("participant");
   const [consentParticipant, setConsentParticipant] = useState("");
   const [consentRecipient, setConsentRecipient] = useState("");
   const [consentAuthoriser, setConsentAuthoriser] = useState("");
-  const [consentAuthority, setConsentAuthority] = useState("");
   const [consentPurpose, setConsentPurpose] = useState("");
   const [consentScope, setConsentScope] = useState("service_summary");
   const [consentEvidence, setConsentEvidence] = useState("");
+  const [renewParticipant, setRenewParticipant] = useState("");
+  const [renewRecipient, setRenewRecipient] = useState("");
+  const [renewExpectedConsent, setRenewExpectedConsent] = useState("");
+  const [renewPurpose, setRenewPurpose] = useState("");
+  const [renewScope, setRenewScope] = useState("");
+  const [renewEvidence, setRenewEvidence] = useState("");
+  const [grantConsent, setGrantConsent] = useState("");
   const [selfParticipant, setSelfParticipant] = useState("");
   const [selfProfile, setSelfProfile] = useState("");
   const [authorityParticipant, setAuthorityParticipant] = useState("");
   const [authorityProfile, setAuthorityProfile] = useState("");
   const inviteRoles = actorRole === "admin" ? ["admin", "scheduler", "worker", "participant", "nominee", "external"] : ["worker", "participant", "nominee"];
+
+  // For a given (participant, recipient) pair, the unique unsuperseded
+  // current consent leaf — if any — is the row to renew against.
+  const currentConsentForPair = (participantId: string, recipientId: string): Record<string, unknown> | null => {
+    return (
+      data.consents.find(
+        (c) =>
+          c.participant_id === participantId &&
+          c.recipient_profile_id === recipientId &&
+          c.superseded_by == null,
+      ) ?? null
+    );
+  };
+  const recordPair = consentParticipant && consentRecipient
+    ? currentConsentForPair(consentParticipant, consentRecipient)
+    : null;
+  const renewPair = renewParticipant && renewRecipient
+    ? currentConsentForPair(renewParticipant, renewRecipient)
+    : null;
+
   return (
     <div className="grid gap-6 lg:grid-cols-2">
       <Card>
@@ -666,7 +789,6 @@ function Access({
                 p_expires_at: new Date(inviteExpiry).toISOString(),
                 p_payload: { source: "admin-workspace" },
               });
-              setEmail("");
             }}
           >
             <Field label="Email"><Input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></Field>
@@ -676,14 +798,16 @@ function Access({
               </select>
             </Field>
             <Field label="Expires"><Input required type="datetime-local" value={inviteExpiry} onChange={(e) => setInviteExpiry(e.target.value)} /></Field>
-            <Button type="submit" disabled={pending}>Issue invitation</Button>
+            <Button type="submit" disabled={isPending(FORM_KEYS.invite)} aria-busy={isPending(FORM_KEYS.invite)}>Issue invitation</Button>
+            {formError(FORM_KEYS.invite) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.invite)}</p> : null}
           </form>
         </CardContent>
       </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>Record consent evidence</CardTitle>
-          <CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window.</CardDescription>
+          <CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window. If a current consent already exists for this (participant, recipient, basis) pair, use the renewal form instead.</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -699,15 +823,13 @@ function Access({
                 p_authorising_profile_id: consentAuthoriser,
                 p_purpose: consentPurpose,
                 p_scope_categories: consentScope.split(",").map((s) => s.trim()).filter(Boolean),
-                p_consent_basis: consentBasis,
-                p_representative_authority_id: consentBasis === "authorised_representative" ? consentAuthority : null,
+                p_consent_basis: "participant",
+                p_representative_authority_id: null,
                 p_evidence_reference: consentEvidence,
                 p_effective_from: from.toISOString(),
                 p_effective_until: until.toISOString(),
                 p_payload: { source: "admin-workspace", provider_recorded: true },
               });
-              setConsentPurpose("");
-              setConsentEvidence("");
             }}
           >
             <Field label="Participant">
@@ -725,41 +847,97 @@ function Access({
                 })}
               </select>
             </Field>
-            <Field label="Consent basis">
-              <select value={consentBasis} onChange={(e) => setConsentBasis(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
-                <option value="participant">Participant self</option>
-                <option value="authorised_representative">Authorised representative</option>
+            <Field label="Participant authoriser">
+              <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant account</option>
+                {data.identities.filter((i) => i.role === "participant").map((i) => {
+                  const label = labelLookup(String(i.profile_id));
+                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
+                })}
               </select>
             </Field>
-            {consentBasis === "authorised_representative" ? (
-              <Field label="Representative authority">
-                <select value={consentAuthority} onChange={(e) => setConsentAuthority(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
-                  <option value="">Choose representative authority</option>
-                  {data.authorities.filter((a) => a.status === "active").map((a) => <option key={String(a.id)} value={String(a.id)}>{String(a.authority_type)}</option>)}
-                </select>
-              </Field>
-            ) : (
-              <Field label="Participant authoriser">
-                <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
-                  <option value="">Choose participant account</option>
-                  {data.identities.filter((i) => i.role === "participant").map((i) => {
-                    const label = labelLookup(String(i.profile_id));
-                    return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
-                  })}
-                </select>
-              </Field>
-            )}
             <Field label="Purpose"><Input required value={consentPurpose} onChange={(e) => setConsentPurpose(e.target.value)} placeholder="e.g. coordination with school" /></Field>
             <Field label="Scope categories"><Input required value={consentScope} onChange={(e) => setConsentScope(e.target.value)} placeholder="service_summary,upcoming_visits" /></Field>
             <Field label="Evidence reference"><Input required value={consentEvidence} onChange={(e) => setConsentEvidence(e.target.value)} placeholder="provider-recorded consent identifier" /></Field>
-            <Button type="submit" disabled={pending}>Record consent evidence</Button>
+            <Button type="submit" disabled={Boolean(recordPair) || isPending(FORM_KEYS.recordConsent)} aria-busy={isPending(FORM_KEYS.recordConsent)}>
+              {recordPair ? "Switch to renew below" : "Record consent evidence"}
+            </Button>
+            {recordPair ? <p className="text-xs text-warning-foreground">A current consent already exists for this pair. Renew it below to keep the lineage singular.</p> : null}
+            {formError(FORM_KEYS.recordConsent) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.recordConsent)}</p> : null}
           </form>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Renew consent evidence</CardTitle>
+          <CardDescription>Renewal walks the successor chain and only succeeds when <code>expected_current_consent_id</code> matches the live leaf. Stale renewals are preserved as conflict evidence.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!renewPair) return;
+              const from = new Date();
+              const until = new Date(Date.now() + 30 * 86400000);
+              void call(FORM_KEYS.renewConsent, "cmd_admin_renew_consent", {
+                p_organisation_id: organisationId,
+                p_consent_id: renewPair.id,
+                p_expected_current_consent_id: renewExpectedConsent || String(renewPair.id),
+                p_purpose: renewPurpose,
+                p_scope_categories: renewScope.split(",").map((s) => s.trim()).filter(Boolean),
+                p_evidence_reference: renewEvidence,
+                p_effective_from: from.toISOString(),
+                p_effective_until: until.toISOString(),
+                p_payload: { source: "admin-workspace", provider_recorded: true },
+              });
+            }}
+          >
+            <Field label="Participant">
+              <select required value={renewParticipant} onChange={(e) => setRenewParticipant(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose participant</option>
+                {data.participants.map((p) => <option key={String(p.id)} value={String(p.id)}>{String(p.first_name)}</option>)}
+              </select>
+            </Field>
+            <Field label="External recipient">
+              <select required value={renewRecipient} onChange={(e) => setRenewRecipient(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose external recipient</option>
+                {data.identities.filter((i) => i.role === "external").map((i) => {
+                  const label = labelLookup(String(i.profile_id));
+                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label} · external</option>;
+                })}
+              </select>
+            </Field>
+            <Field label="Current consent (expected leaf)">
+              <select required value={renewExpectedConsent} onChange={(e) => setRenewExpectedConsent(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Auto-fill from selected pair</option>
+                {data.consents
+                  .filter((c) => c.superseded_by == null)
+                  .map((c) => {
+                    const label = labelLookup(String(c.recipient_profile_id));
+                    return (
+                      <option key={String(c.id)} value={String(c.id)}>
+                        v{String(c.version ?? "1")} · {label.label} · {String(c.purpose)}
+                      </option>
+                    );
+                  })}
+              </select>
+            </Field>
+            <Field label="Updated purpose"><Input required value={renewPurpose} onChange={(e) => setRenewPurpose(e.target.value)} /></Field>
+            <Field label="Updated scope categories"><Input required value={renewScope} onChange={(e) => setRenewScope(e.target.value)} placeholder="service_summary,upcoming_visits" /></Field>
+            <Field label="Updated evidence reference"><Input required value={renewEvidence} onChange={(e) => setRenewEvidence(e.target.value)} /></Field>
+            <Button type="submit" disabled={!renewPair || isPending(FORM_KEYS.renewConsent)} aria-busy={isPending(FORM_KEYS.renewConsent)}>Renew consent evidence</Button>
+            {renewPair ? <p className="text-xs text-muted-foreground">Live leaf: v{String(renewPair.version ?? "1")} · {String(renewPair.purpose)}</p> : <p className="text-xs text-warning-foreground">No current consent exists for this pair yet. Record one above first.</p>}
+            {formError(FORM_KEYS.renewConsent) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.renewConsent)}</p> : null}
+          </form>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>External view-only grant</CardTitle>
-          <CardDescription>Select an active consent record. The grant inherits its purpose, recipient, categories, basis, and evidence; only a bounded grant window is entered here.</CardDescription>
+          <CardDescription>Select the unique unsuperseded current consent. Grants are blocked from superseded evidence.</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -782,17 +960,18 @@ function Access({
             <Field label="Consent evidence">
               <select required value={grantConsent} onChange={(e) => setGrantConsent(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
                 <option value="">Choose current consent evidence</option>
-                {data.consents.filter((c) => c.status === "active").map((c) => {
+                {data.consents.filter((c) => c.status === "active" && c.superseded_by == null).map((c) => {
                   const label = labelLookup(String(c.recipient_profile_id));
                   return (
                     <option key={String(c.id)} value={String(c.id)}>
-                      {String(c.purpose)} · {label.label} · v{String(c.version ?? "1")}
+                      v{String(c.version ?? "1")} · {String(c.purpose)} · {label.label}
                     </option>
                   );
                 })}
               </select>
             </Field>
-            <Button type="submit">Create view-only grant</Button>
+            <Button type="submit" disabled={isPending(FORM_KEYS.createGrant)} aria-busy={isPending(FORM_KEYS.createGrant)}>Create view-only grant</Button>
+            {formError(FORM_KEYS.createGrant) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.createGrant)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -815,6 +994,8 @@ function Access({
                       className="mt-3"
                       size="sm"
                       variant="destructive"
+                      disabled={isPending(FORM_KEYS.revokeGrant)}
+                      aria-busy={isPending(FORM_KEYS.revokeGrant)}
                       onClick={() =>
                         void call(FORM_KEYS.revokeGrant, "cmd_admin_revoke_grant", {
                           p_organisation_id: organisationId,
@@ -851,7 +1032,6 @@ function Access({
                 p_evidence_reference: selfEvidence,
                 p_payload: { source: "admin-workspace" },
               });
-              setSelfEvidence("");
             }}
           >
             <Field label="Participant">
@@ -870,7 +1050,8 @@ function Access({
               </select>
             </Field>
             <Field label="Evidence reference"><Input required value={selfEvidence} onChange={(e) => setSelfEvidence(e.target.value)} /></Field>
-            <Button type="submit" variant="outline">Link self-access</Button>
+            <Button type="submit" variant="outline" disabled={isPending(FORM_KEYS.linkSelf)} aria-busy={isPending(FORM_KEYS.linkSelf)}>Link self-access</Button>
+            {formError(FORM_KEYS.linkSelf) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.linkSelf)}</p> : null}
           </form>
         </CardContent>
       </Card>
@@ -898,7 +1079,6 @@ function Access({
                 p_effective_until: until.toISOString(),
                 p_payload: { source: "admin-workspace" },
               });
-              setEvidence("");
             }}
           >
             <Field label="Participant">
@@ -919,7 +1099,8 @@ function Access({
             <Field label="Authority type"><Input required value={authorityType} onChange={(e) => setAuthorityType(e.target.value)} /></Field>
             <Field label="Scope categories"><Input required value={authorityScope} onChange={(e) => setAuthorityScope(e.target.value)} /></Field>
             <Field label="Evidence reference"><Input required value={evidence} onChange={(e) => setEvidence(e.target.value)} /></Field>
-            <Button type="submit" variant="outline">Record representative authority</Button>
+            <Button type="submit" variant="outline" disabled={isPending(FORM_KEYS.setAuthority)} aria-busy={isPending(FORM_KEYS.setAuthority)}>Record representative authority</Button>
+            {formError(FORM_KEYS.setAuthority) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.setAuthority)}</p> : null}
           </form>
         </CardContent>
       </Card>
