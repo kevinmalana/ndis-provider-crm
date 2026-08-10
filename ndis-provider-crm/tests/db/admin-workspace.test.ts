@@ -23,14 +23,15 @@ describe("admin workspace command RPCs", () => {
   it("returns overlap and availability warnings without blocking shift creation", async () => {
     ex.setUser(fx.schedulerUid);
     const workerMembership = (await ex.execAsService(`select id from public.organisation_memberships where organisation_id='${fx.orgId}' and profile_id='${fx.workerAUid}'`)).rows[0] as { id: string };
-    const result = await ex.callRpc("cmd_admin_create_shift", {
+    const result = await ex.callRpc("cmd_admin_create_service_ready_shift", {
       command_id: "admin-shift-1", organisation_id: fx.orgId, participant_id: fx.participantId,
       worker_membership: workerMembership.id,
+      service_context_id: fx.contextId,
       scheduled_start: "2026-08-07T10:30:00Z", scheduled_end: "2026-08-07T11:30:00Z", reason: "cover", payload: {},
-    }) as { status: string; warnings: string[] };
+    }) as { status: string; snapshot_id: string; readiness: { ready: boolean } };
     expect(result.status).toBe("accepted");
-    expect(result.warnings).toContain("worker_overlap");
-    expect(result.warnings).toContain("outside_published_availability");
+    expect(result.snapshot_id).toBeTruthy();
+    expect(result.readiness).toMatchObject({ ready: true });
   });
 
   it("reserves the receipt before mutation and returns the original outcome on altered retry", async () => {
@@ -82,9 +83,9 @@ describe("admin workspace command RPCs", () => {
     const availability = await ex.callRpc("cmd_admin_set_availability", availabilityArgs) as { availability_id: string };
     const availabilityRetry = await ex.callRpc("cmd_admin_set_availability", { ...availabilityArgs, note: "altered" }) as { status: string; outcome: { availability_id: string } };
     expect(availabilityRetry).toMatchObject({ status: "duplicate_returned", outcome: { availability_id: availability.availability_id } });
-    const shiftArgs = { command_id: "dedupe-shift", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, scheduled_start: "2026-08-07T19:00:00Z", scheduled_end: "2026-08-07T20:00:00Z", reason: "routine", payload: {} };
-    const shift = await ex.callRpc("cmd_admin_create_shift", shiftArgs) as { shift_id: string };
-    const shiftRetry = await ex.callRpc("cmd_admin_create_shift", { ...shiftArgs, reason: "altered" }) as { status: string; outcome: { shift_id: string } };
+    const shiftArgs = { command_id: "dedupe-shift", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, service_context_id: fx.contextId, scheduled_start: "2026-08-07T19:00:00Z", scheduled_end: "2026-08-07T20:00:00Z", reason: "routine", payload: {} };
+    const shift = await ex.callRpc("cmd_admin_create_service_ready_shift", shiftArgs) as { shift_id: string };
+    const shiftRetry = await ex.callRpc("cmd_admin_create_service_ready_shift", { ...shiftArgs, reason: "altered" }) as { status: string; outcome: { shift_id: string } };
     expect(shiftRetry).toMatchObject({ status: "duplicate_returned", outcome: { shift_id: shift.shift_id } });
     const grantArgs = { command_id: "dedupe-grant", organisation_id: fx.orgId, consent_id: consent.consent_id, effective_from: "2026-08-01T00:00:00Z", effective_until: "2026-09-01T00:00:00Z", payload: {} };
     const grant = await ex.callRpc("cmd_admin_create_grant", grantArgs) as { grant_id: string };
@@ -110,7 +111,8 @@ describe("admin workspace command RPCs", () => {
     ex.setUser(fx.schedulerUid);
     const worker = (await ex.execAsService(`select id from public.organisation_memberships where organisation_id='${fx.orgId}' and profile_id='${fx.workerAUid}'`)).rows[0] as { id: string };
     await ex.execAsService(`insert into public.organisation_membership_roles (membership_id, role, status, effective_from) values ('${worker.id}','worker','active',now()+interval '1 day')`);
-    await expect(ex.callRpc("cmd_admin_create_shift", { command_id: "future-worker", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, scheduled_start: "2026-08-07T10:30:00Z", scheduled_end: "2026-08-07T11:30:00Z", reason: "future", payload: {} })).rejects.toThrow("invalid_target_worker");
+    await ex.execAsService(`update public.organisation_memberships set effective_from='2026-08-08T00:00:00Z' where id='${worker.id}'`);
+    await expect(ex.callRpc("cmd_admin_create_service_ready_shift", { command_id: "future-worker", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, service_context_id: fx.contextId, scheduled_start: "2026-08-07T10:30:00Z", scheduled_end: "2026-08-07T11:30:00Z", reason: "future", payload: {} })).rejects.toThrow("provider_not_ready");
     await ex.execAsService(`update public.organisations set deleted_at=now() where id='${fx.orgId}'`);
     await expect(ex.callRpc("cmd_admin_create_participant", { command_id: "deleted-org", organisation_id: fx.orgId, first_name: "Blocked", last_initial: "B", critical_content: "No", review_due_at: "2026-08-20T00:00:00Z", payload: {} })).rejects.toThrow("admin_or_scheduler_required");
   });
@@ -145,7 +147,7 @@ describe("admin workspace command RPCs", () => {
   it("uses creation vocabulary and hardens definer ACL/search path", async () => {
     ex.setUser(fx.schedulerUid);
     const worker = (await ex.execAsService(`select id from public.organisation_memberships where organisation_id='${fx.orgId}' and profile_id='${fx.workerAUid}'`)).rows[0] as { id: string };
-    const result = await ex.callRpc("cmd_admin_create_shift", { command_id: "created-event", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, scheduled_start: "2026-08-07T12:30:00Z", scheduled_end: "2026-08-07T13:30:00Z", reason: "routine", payload: {} }) as { shift_id: string };
+    const result = await ex.callRpc("cmd_admin_create_service_ready_shift", { command_id: "created-event", organisation_id: fx.orgId, participant_id: fx.participantId, worker_membership: worker.id, service_context_id: fx.contextId, scheduled_start: "2026-08-07T12:30:00Z", scheduled_end: "2026-08-07T13:30:00Z", reason: "routine", payload: {} }) as { shift_id: string };
     const event = await ex.execAsService(`select event_type from public.shift_events where shift_id='${result.shift_id}'`);
     expect(event.rows[0]).toMatchObject({ event_type: "created" });
     const catalog = await ex.execAsService(`select p.proconfig, has_function_privilege('anon', p.oid, 'execute') as anon_execute from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='cmd_admin_create_participant'`);

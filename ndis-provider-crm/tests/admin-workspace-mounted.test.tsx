@@ -99,6 +99,7 @@ const initialData = {
   consents: [],
   availability: [],
   audit: [],
+  serviceContexts: [{ id: "ctx-1", participant_id: "p-1", goal_reference: "Goal 1", lifecycle_state: "active" }],
 };
 
 const organisation = { id: "org-1", name: "Test Org", role: "scheduler" };
@@ -175,6 +176,7 @@ async function fillCreateShift(): Promise<void> {
     fireEvent.change(participants[0], { target: { value: "p-1" } });
     const workers = screen.getAllByLabelText("Worker");
     fireEvent.change(workers[0], { target: { value: "m-worker-1" } });
+    fireEvent.change(screen.getByLabelText("Reviewed service context"), { target: { value: "ctx-1" } });
     fireEvent.change(screen.getByLabelText("Scheduled start"), { target: { value: "2026-09-01T09:00" } });
     fireEvent.change(screen.getByLabelText("Scheduled end"), { target: { value: "2026-09-01T10:00" } });
   });

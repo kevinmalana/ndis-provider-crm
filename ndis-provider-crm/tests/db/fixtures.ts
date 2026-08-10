@@ -36,6 +36,7 @@ export type Fixture = {
   noRoleUid: string;
   participantId: string;
   shiftId: string;
+  contextId: string;
   version: number;
 };
 
@@ -67,6 +68,15 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     externalGrant: cryptoUUID(),
     assignmentA: cryptoUUID(),
     shiftVersion: 1,
+    scope: cryptoUUID(),
+    capability: cryptoUUID(),
+    catalogue: cryptoUUID(),
+    item: cryptoUUID(),
+    roleVersion: cryptoUUID(),
+    screeningPolicy: cryptoUUID(),
+    competenceRequirement: cryptoUUID(),
+    context: cryptoUUID(),
+    snapshot: cryptoUUID(),
   };
 
   // Insert auth.users for each identity (FK target of global_profiles).
@@ -126,7 +136,16 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
        ('${ids.membershipRepresenter}','${ids.org}', '${ids.representer}', 'nominee', 'active', now()),
        ('${ids.membershipExternal}', '${ids.org}', '${ids.external}', 'external', 'active', now())`,
   );
-
+  await ex.execAsService(`update public.organisation_memberships set effective_from='2026-08-01T00:00:00Z' where id in ('${ids.membershipWorkerA}','${ids.membershipWorkerB}')`);
+  await ex.execAsService(`insert into public.organisation_provider_scope_versions (id,organisation_id,registration_state,registration_group,class_of_support,jurisdictions,effective_from,authored_by,reviewed_by) values ('${ids.scope}','${ids.org}','registered','test','individual',array['NSW'],'2026-08-06T00:00:00Z','${ids.admin}','${ids.admin}')`);
+  await ex.execAsService(`insert into public.organisation_support_capabilities (id,organisation_id,scope_version_id,support_category,service_kind,capability,effective_from) values ('${ids.capability}','${ids.org}','${ids.scope}','daily_living','individual_time','individual_time_supported','2026-08-06T00:00:00Z')`);
+  await ex.execAsService(`insert into public.provider_support_catalogue_versions (id,organisation_id,source_label,source_version,effective_from,created_by) values ('${ids.catalogue}','${ids.org}','Test catalogue','v1','2026-08-06T00:00:00Z','${ids.admin}')`);
+  await ex.execAsService(`insert into public.provider_support_items (id,organisation_id,catalogue_version_id,item_code,item_name,support_category,time_unit,service_kind,effective_from) values ('${ids.item}','${ids.org}','${ids.catalogue}','TEST-TIME','Test time support','daily_living','hour','individual_time','2026-08-06T00:00:00Z')`);
+  await ex.execAsService(`insert into public.risk_assessed_role_versions (id,organisation_id,title,definition_basis,description,assessed_at,assessor_name,assessor_title,effective_from,created_by) values ('${ids.roleVersion}','${ids.org}','Test worker','test','Test risk role','2026-08-06T00:00:00Z','Alice','Admin','2026-08-06T00:00:00Z','${ids.admin}')`);
+  await ex.execAsService(`insert into public.role_screening_policy_versions (id,organisation_id,role_version_id,registration_state,decision,decision_owner,decision_reason,effective_from,created_by) values ('${ids.screeningPolicy}','${ids.org}','${ids.roleVersion}','registered','required','Alice','Test policy','2026-08-06T00:00:00Z','${ids.admin}')`);
+  await ex.execAsService(`insert into public.role_competence_requirements (id,organisation_id,role_version_id,support_category,evidence_type,requirement_state,assessment_method,review_owner,effective_from,created_by) values ('${ids.competenceRequirement}','${ids.org}','${ids.roleVersion}','daily_living','induction','required','provider_assessed','Alice','2026-08-06T00:00:00Z','${ids.admin}')`);
+  await ex.execAsService(`insert into public.worker_screening_verification_versions (organisation_id,worker_membership_id,role_version_id,source_checked,verifier_name,verified_at,application_or_check_reference,clearance_status,clearance_expires_at,effective_from,created_by) values ('${ids.org}','${ids.membershipWorkerA}','${ids.roleVersion}','test','Alice','2026-08-06T00:00:00Z','TEST-CLEAR','current','2026-09-01T00:00:00Z','2026-08-06T00:00:00Z','${ids.admin}')`);
+  await ex.execAsService(`insert into public.worker_competence_evidence_versions (organisation_id,worker_membership_id,requirement_id,evidence_type,issuer,evidence_reference,verifier_name,assessed_state,expires_at,effective_from,created_by) values ('${ids.org}','${ids.membershipWorkerA}','${ids.competenceRequirement}','induction','Test','TEST-COMP','Alice','met','2026-09-01T00:00:00Z','2026-08-06T00:00:00Z','${ids.admin}')`);
   // Active context for all four (so the helper picks the test org).
   for (const uid of [
     ids.admin,
@@ -145,6 +164,7 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     `insert into public.participants (id, organisation_id, first_name, last_initial, created_by)
      values ('${ids.participantRow}','${ids.org}','Maya','R','${ids.admin}')`,
   );
+  await ex.execAsService(`insert into public.participant_service_context_versions (id,organisation_id,participant_id,capability_id,catalogue_item_id,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state) values ('${ids.context}','${ids.org}','${ids.participantRow}','${ids.capability}','${ids.item}','TEST-AGREEMENT','TEST-PLAN','provider_recorded','${ids.admin}','${ids.admin}','2026-08-06T00:00:00Z','2026-09-01T00:00:00Z','participant','TEST-GOAL','Test participant goal','active')`);
 
   await ex.execAsService(
     `insert into public.participant_self_links
@@ -152,7 +172,6 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
      values
        ('${ids.selfLink}','${ids.org}','${ids.participantRow}','${ids.participant}','active','self-attested')`,
   );
-
   await ex.execAsService(
     `insert into public.representative_authorities
        (id, organisation_id, participant_id, representative_profile_id, authority_type, scope_categories, effective_from)
@@ -182,7 +201,6 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
         now(),
         now() + interval '30 days')`,
   );
-
   // Shift scheduled in the next hour.
   const start = isoTime(TEST_TS.getTime() + 60 * 60 * 1000);
   const end = isoTime(TEST_TS.getTime() + 2 * 60 * 60 * 1000);
@@ -198,6 +216,7 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
      values
        ('${ids.assignmentA}','${ids.shift}','${ids.org}','${ids.membershipWorkerA}','${ids.admin}')`,
   );
+  await ex.execAsService(`insert into public.shift_service_snapshots (id,organisation_id,shift_id,service_context_id,capability_id,catalogue_item_id,catalogue_version_id,item_code,item_name,support_category,service_kind,time_unit,goal_reference,goal_display,scheduled_start,scheduled_end) values ('${ids.snapshot}','${ids.org}','${ids.shift}','${ids.context}','${ids.capability}','${ids.item}','${ids.catalogue}','TEST-TIME','Test time support','daily_living','individual_time','hour','TEST-GOAL','Test participant goal','${start}','${end}')`);
 
   return {
     orgId: ids.org,
@@ -211,6 +230,7 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     noRoleUid: ids.norole,
     participantId: ids.participantRow,
     shiftId: ids.shift,
+    contextId: ids.context,
     version: ids.shiftVersion,
   };
 }

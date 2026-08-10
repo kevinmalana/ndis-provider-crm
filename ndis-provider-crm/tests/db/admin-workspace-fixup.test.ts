@@ -240,7 +240,7 @@ describe("ticket 05 DB fixup — consent evidence ACL", () => {
       "cmd_admin_set_authority",
       "cmd_admin_revoke_grant",
       "cmd_admin_set_availability",
-      "cmd_admin_create_shift",
+      "cmd_admin_create_service_ready_shift",
       "cmd_admin_link_participant",
       "list_admin_workspace_self_links",
     ];

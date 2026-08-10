@@ -217,12 +217,24 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "effective_until", type: "timestamptz" }, { name: "payload", type: "jsonb" },
     ],
   },
-  cmd_admin_create_shift: {
-    params: [
+  cmd_admin_create_service_ready_shift: {
+      params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
       { name: "participant_id", type: "uuid" }, { name: "worker_membership", type: "uuid" },
+      { name: "service_context_id", type: "uuid" },
       { name: "scheduled_start", type: "timestamptz" }, { name: "scheduled_end", type: "timestamptz" },
       { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_service_context: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "participant_id", type: "uuid" },
+      { name: "capability_id", type: "uuid" }, { name: "catalogue_item_id", type: "uuid" }, { name: "external_agreement_reference", type: "text" },
+      { name: "plan_reference", type: "text" }, { name: "source_type", type: "text" }, { name: "owner_profile_id", type: "uuid" },
+      { name: "reviewer_profile_id", type: "uuid" }, { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" },
+      { name: "goal_source", type: "text" }, { name: "goal_reference", type: "text" }, { name: "goal_display", type: "text" },
+      { name: "lifecycle_state", type: "text" }, { name: "screening_required", type: "boolean" }, { name: "screening_decision_issuer", type: "text" },
+      { name: "screening_decision_authority", type: "text" }, { name: "screening_evidence_reference", type: "text" }, { name: "payload", type: "jsonb" },
     ],
   },
   cmd_admin_create_grant: {
