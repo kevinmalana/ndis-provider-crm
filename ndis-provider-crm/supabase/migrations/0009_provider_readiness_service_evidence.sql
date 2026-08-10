@@ -221,7 +221,7 @@ declare actor uuid; reserved record; ready jsonb; s public.shifts%rowtype; a pub
 begin
   actor := public.admin_context(p_organisation_id);
   if p_scheduled_end <= p_scheduled_start then raise exception 'shift_dates_invalid'; end if;
-  select * into reserved from public.reserve_admin_command(p_command_id,'admin_create_service_ready_shift',p_organisation_id,actor,p_payload);
+  select * into reserved from public.reserve_admin_command(p_command_id,'admin_create_service_ready_shift',p_organisation_id,p_payload);
   if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   ready := public.provider_readiness(p_organisation_id,p_worker_membership,p_service_context_id,p_scheduled_start,p_scheduled_end);
   if coalesce((ready->>'ready')::boolean,false) is not true then raise exception 'provider_not_ready' using detail = ready->>'reason'; end if;
@@ -249,7 +249,7 @@ begin
   actor := public.current_membership(p_organisation_id);
   if actor is null or not public.membership_has_role(actor,'admin') then raise exception 'admin_required' using errcode='42501'; end if;
   if nullif(pg_catalog.btrim(p_reason),'') is null then raise exception 'reveal_reason_required'; end if;
-  select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,actor,p_payload);
+  select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,p_payload);
   if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   select identifier_value into value from public.participant_ndis_identifiers where organisation_id=p_organisation_id and participant_id=p_participant_id;
   if value is null then raise exception 'identifier_not_found'; end if;
@@ -281,7 +281,7 @@ returns trigger language plpgsql security definer set search_path = '' as $$ beg
       where a.shift_id = new.id and a.withdrawn_at is null and a.effective_from <= pg_catalog.now()
         and (a.effective_until is null or a.effective_until > pg_catalog.now())
         and (public.provider_readiness(new.organisation_id,a.membership_id,(select service_context_id from public.shift_service_snapshots where shift_id=new.id),new.scheduled_start,new.scheduled_end)->>'ready')::boolean
-    ) then raise exception 'provider_readiness_failed'; end if;
+    ) then raise exception 'provider_readiness_failed:%', (select public.provider_readiness(new.organisation_id,(select membership_id from public.shift_assignments where shift_id=new.id and withdrawn_at is null order by effective_from desc limit 1),(select service_context_id from public.shift_service_snapshots where shift_id=new.id),new.scheduled_start,new.scheduled_end)->>'reason') using errcode='23514'; end if;
   end if;
   if old.state = 'started' and new.state in ('ended_summary_required','finalised') then
     if exists (select 1 from public.shift_service_snapshots x where x.shift_id = new.id)
@@ -323,7 +323,7 @@ declare actor uuid; reserved record; row_id uuid; out jsonb;
 begin
   actor := public.current_membership(p_organisation_id); if actor is null or not public.membership_has_role(actor,'admin') then raise exception 'admin_required' using errcode='42501'; end if;
   if nullif(pg_catalog.btrim(p_identifier),'') is null or p_identifier !~ '^[0-9]{9,12}$' then raise exception 'identifier_invalid'; end if;
-  select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,actor,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
+  select * into reserved from public.reserve_admin_command(p_command_id,'admin_identifier',p_organisation_id,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   insert into public.participant_ndis_identifiers(organisation_id,participant_id,identifier_value,created_by) values(p_organisation_id,p_participant_id,pg_catalog.btrim(p_identifier),auth.uid()) on conflict(organisation_id,participant_id) do update set identifier_value=excluded.identifier_value,updated_at=pg_catalog.now() returning id into row_id;
   insert into public.audit_log(organisation_id,actor,action,subject_type,subject_id,metadata) values(p_organisation_id,auth.uid(),'participant_ndis_identifier.recorded','participant',p_participant_id,pg_catalog.jsonb_build_object('identifier_id',row_id));
   out := pg_catalog.jsonb_build_object('identifier_id',row_id,'masked_identifier',public.mask_participant_ndis_identifier(p_identifier)); perform public.finalize_admin_command(reserved.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',reserved.receipt_id)||out;
@@ -346,7 +346,7 @@ declare actor uuid; reserved record; row_id uuid; out jsonb;
 begin
   actor := public.admin_context(p_organisation_id); if p_effective_until <= p_effective_from then raise exception 'context_dates_invalid'; end if; if p_lifecycle_state not in ('draft','active','review_required') then raise exception 'context_lifecycle_invalid'; end if;
   if p_lifecycle_state='active' and (p_reviewer_profile_id is null or nullif(pg_catalog.btrim(p_goal_reference),'') is null) then raise exception 'reviewed_context_required'; end if;
-  select * into reserved from public.reserve_admin_command(p_command_id,'admin_service_context',p_organisation_id,actor,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
+  select * into reserved from public.reserve_admin_command(p_command_id,'admin_service_context',p_organisation_id,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   insert into public.participant_service_context_versions(organisation_id,participant_id,capability_id,catalogue_item_id,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state,screening_required_by_participant,screening_decision_issuer,screening_decision_authority,screening_evidence_reference) values(p_organisation_id,p_participant_id,p_capability_id,p_catalogue_item_id,pg_catalog.btrim(p_external_agreement_reference),nullif(pg_catalog.btrim(p_plan_reference),''),pg_catalog.btrim(p_source_type),p_owner_profile_id,p_reviewer_profile_id,p_effective_from,p_effective_until,pg_catalog.btrim(p_goal_source),pg_catalog.btrim(p_goal_reference),pg_catalog.btrim(p_goal_display),p_lifecycle_state,p_screening_required,p_screening_decision_issuer,p_screening_decision_authority,p_screening_evidence_reference) returning id into row_id;
   out := pg_catalog.jsonb_build_object('service_context_id',row_id); perform public.finalize_admin_command(reserved.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',reserved.receipt_id)||out;
 end $$;
@@ -361,7 +361,7 @@ begin
   actor := public.admin_context(p_organisation_id); if p_event_class not in ('attempt','conclusive') then raise exception 'ack_event_class_invalid'; end if;
   if p_event_class='attempt' and (p_event_type not in ('unavailable_attempt','not_obtained_attempt') or nullif(pg_catalog.btrim(p_reason),'') is null) then raise exception 'ack_attempt_reason_required'; end if;
   if p_event_class='conclusive' and (p_event_type not in ('external_signed_evidence','external_decline_evidence') or nullif(pg_catalog.btrim(p_method),'') is null or nullif(pg_catalog.btrim(p_external_evidence_reference),'') is null or p_reported_signer_profile_id is null or p_authority_type is null) then raise exception 'ack_conclusive_evidence_required'; end if;
-  select * into reserved from public.reserve_admin_command(p_command_id,'admin_acknowledgement',p_organisation_id,actor,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
+  select * into reserved from public.reserve_admin_command(p_command_id,'admin_acknowledgement',p_organisation_id,p_payload); if not reserved.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',reserved.receipt_id,'outcome',reserved.outcome); end if;
   if p_event_class='conclusive' then
     valid_authority := p_authority_type='participant_self' and exists(select 1 from public.shifts s join public.participant_self_links l on l.participant_id=s.participant_id where s.id=p_shift_id and l.profile_id=p_reported_signer_profile_id and l.status='active')
       or p_authority_type in ('child_representative','plan_nominee','legal_guardian') and exists(select 1 from public.shifts s join public.representative_authorities a on a.participant_id=s.participant_id where s.id=p_shift_id and a.representative_profile_id=p_reported_signer_profile_id and a.status='active' and p_occurred_at >= a.effective_from and (a.effective_until is null or p_occurred_at < a.effective_until) and ('service_acknowledgement'=any(a.scope_categories) or 'service_summary'=any(a.scope_categories)));
