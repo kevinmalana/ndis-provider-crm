@@ -310,7 +310,6 @@ end $$;
 revoke all on function public.prevent_legacy_incomplete_start() from public;
 revoke all on function public.prevent_legacy_incomplete_start() from anon;
 drop trigger if exists shifts_prevent_legacy_incomplete_start on public.shifts;
-drop trigger if exists shifts_prevent_legacy_incomplete_start on public.shifts;
 create trigger shifts_prevent_legacy_incomplete_start before update on public.shifts for each row execute function public.prevent_legacy_incomplete_start();
 
 create or replace function public.prevent_unready_reassignment()
