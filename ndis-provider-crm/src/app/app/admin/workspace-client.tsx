@@ -55,6 +55,14 @@ type Data = {
   audit: Array<Record<string, unknown>>;
   selfLinks?: Array<Record<string, unknown>>;
   serviceContexts?: Array<Record<string, unknown>>;
+  providerScopes?: Array<Record<string, unknown>>;
+  capabilities?: Array<Record<string, unknown>>;
+  catalogues?: Array<Record<string, unknown>>;
+  catalogueItems?: Array<Record<string, unknown>>;
+  roles?: Array<Record<string, unknown>>;
+  screeningPolicies?: Array<Record<string, unknown>>;
+  snapshots?: Array<Record<string, unknown>>;
+  ackLedger?: Array<Record<string, unknown>>;
 };
 
 const isoTomorrow = () => new Date(Date.now() + 86400000).toISOString().slice(0, 16);
@@ -72,6 +80,13 @@ const FORM_KEYS = {
   revokeGrant: "revoke-grant",
   linkSelf: "link-self",
   setAuthority: "set-authority",
+  providerScope: "provider-scope",
+  capability: "capability",
+  catalogue: "catalogue",
+  workerVerification: "worker-verification",
+  competenceEvidence: "competence-evidence",
+  contextState: "context-state",
+  acknowledgement: "acknowledgement",
 } as const;
 
 type FormKey = typeof FORM_KEYS[keyof typeof FORM_KEYS];
@@ -306,7 +321,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
       </header>
 
       <nav aria-label="Admin workspace sections" className="flex flex-wrap gap-2 border-b pb-3">
-        {["overview", "participants", "roster", "access", "audit"].map((item) => <Button key={item} variant={tab === item ? "default" : "outline"} onClick={() => setTab(item)} aria-current={tab === item ? "page" : undefined}>{item[0].toUpperCase() + item.slice(1)}</Button>)}
+        {["overview", "participants", "roster", "readiness", "access", "audit"].map((item) => <Button key={item} variant={tab === item ? "default" : "outline"} onClick={() => setTab(item)} aria-current={tab === item ? "page" : undefined}>{item[0].toUpperCase() + item.slice(1)}</Button>)}
       </nav>
       {pendingWarnings.map(({ resultKey, warnings: warningKeys }) => {
         const allAck = allWarningsAcknowledged(acks, resultKey, warningKeys);
@@ -363,6 +378,9 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
           isPending={isFormPending}
           formError={formError}
         />
+      ) : null}
+      {tab === "readiness" ? (
+        <Readiness data={data} organisationId={organisation.id} workers={workers} call={call} isPending={isFormPending} formError={formError} />
       ) : null}
       {tab === "access" ? (
         <Access
@@ -731,6 +749,101 @@ function Roster({
           </div>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function Readiness({
+  data,
+  organisationId,
+  workers,
+  call,
+  isPending,
+  formError,
+}: {
+  data: Data;
+  organisationId: string;
+  workers: Array<Record<string, unknown>>;
+  call: FormCall;
+  isPending: (formKey: FormKey) => boolean;
+  formError: (formKey: FormKey) => string | null;
+}) {
+  const [registrationState, setRegistrationState] = useState("registered");
+  const [jurisdictions, setJurisdictions] = useState("NSW");
+  const [scope, setScope] = useState("");
+  const [capability, setCapability] = useState("");
+  const [catalogueItem, setCatalogueItem] = useState("");
+  const [worker, setWorker] = useState("");
+  const [role, setRole] = useState("");
+  const [verificationRef, setVerificationRef] = useState("");
+  const [requirement, setRequirement] = useState("");
+  const [evidenceRef, setEvidenceRef] = useState("");
+  const [context, setContext] = useState("");
+  const [contextState, setContextState] = useState("active");
+  const [shift, setShift] = useState("");
+  const [signer, setSigner] = useState("");
+  const [ackMode, setAckMode] = useState("attempt");
+  const syntheticWorker = workers[0];
+  const participantIdentity = data.identities.find((m) => m.role === "participant");
+  const selectedShift = data.shifts.find((s) => String(s.id) === shift);
+  const selectedContext = data.serviceContexts?.find((c) => String(c.id) === context);
+  const selectedScope = data.providerScopes?.[0];
+  const selectedCapability = data.capabilities?.[0];
+  const selectedCatalogueItem = data.catalogueItems?.[0];
+  const inputBase = "h-9 w-full rounded-md border bg-background px-2";
+  const message = (key: FormKey) => formError(key) ? <p role="status" className="text-xs text-info-foreground">{formError(key)}</p> : null;
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle>Provider readiness journey</CardTitle><CardDescription>Complete this synthetic, provider-recorded path in order. Scope and catalogue are provider configuration; this screen makes no live Commission, NDIA catalogue, legal, billing or specialist-workflow claim.</CardDescription></CardHeader>
+        <CardContent><ol className="grid gap-2 text-sm md:grid-cols-2 lg:grid-cols-5">{["Configure provider scope", "Add individual time item", "Define risk role and screening policy", "Verify worker screening and competence", "Activate reviewed participant context", "Create service-ready shift", "Inspect immutable snapshot", "Record provider acknowledgement", "Review readiness reasons", "Use recovery action"].map((step, i) => <li key={step} className="rounded-md border p-3"><span className="mr-2 font-semibold">{i + 1}.</span>{step}</li>)}</ol></CardContent>
+      </Card>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card><CardHeader><CardTitle>1–2. Provider scope and capability</CardTitle><CardDescription>Versioned jurisdiction and explicit support boundary.</CardDescription></CardHeader><CardContent className="space-y-4">
+          <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.providerScope, "cmd_admin_create_provider_scope_version", { p_organisation_id: organisationId, p_registration_state: registrationState, p_registration_group: "synthetic", p_class_of_support: "individual", p_jurisdictions: jurisdictions.split(",").map((x) => x.trim()).filter(Boolean), p_effective_from: new Date().toISOString(), p_effective_until: null, p_reviewed_by: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Registration declaration"><select className={inputBase} value={registrationState} onChange={(e) => setRegistrationState(e.target.value)}><option value="registered">Registered</option><option value="unregistered">Unregistered</option></select></Field>
+            <Field label="Jurisdictions"><Input required value={jurisdictions} onChange={(e) => setJurisdictions(e.target.value)} placeholder="NSW" /></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.providerScope)} aria-busy={isPending(FORM_KEYS.providerScope)}>Save provider scope version</Button>{message(FORM_KEYS.providerScope)}
+          </form>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.capability, "cmd_admin_create_support_capability", { p_organisation_id: organisationId, p_scope_version_id: scope || String(selectedScope?.id ?? ""), p_support_category: "daily_living", p_service_kind: "individual_time", p_capability: "individual_time_supported", p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Scope version"><select required className={inputBase} value={scope} onChange={(e) => setScope(e.target.value)}><option value="">Choose scope</option>{(data.providerScopes ?? []).map((s) => <option key={String(s.id)} value={String(s.id)}>{String(s.registration_state)} · {String(s.jurisdictions ?? "")}</option>)}</select></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.capability)} aria-busy={isPending(FORM_KEYS.capability)}>Add individual time capability</Button>{message(FORM_KEYS.capability)}
+          </form>
+        </CardContent></Card>
+        <Card><CardHeader><CardTitle>3. Provider catalogue</CardTitle><CardDescription>Provider-managed source label/version only; no live catalogue verification.</CardDescription></CardHeader><CardContent><form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.catalogue, "cmd_admin_create_catalogue_item", { p_organisation_id: organisationId, p_source_label: "Synthetic provider catalogue", p_source_version: "v1", p_catalogue_effective_from: new Date().toISOString(), p_catalogue_effective_until: null, p_item_code: "SYN-TIME-001", p_item_name: "Individual time support", p_support_category: "daily_living", p_time_unit: "hour", p_service_kind: "individual_time", p_item_effective_from: new Date().toISOString(), p_item_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Catalogue source"><Input required defaultValue="Synthetic provider catalogue" /></Field><Field label="Item code"><Input required defaultValue="SYN-TIME-001" /></Field><Field label="Time unit"><select className={inputBase} defaultValue="hour"><option value="hour">Hour</option><option value="minute">Minute</option></select></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.catalogue)} aria-busy={isPending(FORM_KEYS.catalogue)}>Add time-based supported item</Button>{message(FORM_KEYS.catalogue)}
+          </form><div className="mt-4 space-y-2 text-sm">{(data.catalogueItems ?? []).map((item) => <div key={String(item.id)} className="rounded border p-2"><strong>{String(item.item_code)}</strong> · {String(item.item_name)} · {String(item.time_unit)} · {String(item.status)}</div>)}</div>
+        </CardContent></Card>
+        <Card><CardHeader><CardTitle>4–5. Role, screening and competence evidence</CardTitle><CardDescription>Named provider records. Missing, expired, barred, suspended, excluded, revoked or incomplete evidence remains unready.</CardDescription></CardHeader><CardContent className="space-y-4">
+          <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.workerVerification, "cmd_admin_record_worker_verification", { p_organisation_id: organisationId, p_worker_membership_id: worker || String(syntheticWorker?.membership_id ?? ""), p_role_version_id: role || String(data.roles?.[0]?.id ?? ""), p_source_checked: "Synthetic provider register", p_verifier_name: "Synthetic Admin", p_verified_at: new Date().toISOString(), p_application_or_check_reference: verificationRef, p_clearance_status: "current", p_clearance_expires_at: new Date(Date.now() + 31536000000).toISOString(), p_interim_bar: false, p_suspension: false, p_exclusion: false, p_revocation: false, p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Worker"><select required className={inputBase} value={worker} onChange={(e) => setWorker(e.target.value)}><option value="">Choose worker</option>{workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.membership_id)}</option>)}</select></Field>
+            <Field label="Risk-assessed role"><select required className={inputBase} value={role} onChange={(e) => setRole(e.target.value)}><option value="">Choose role</option>{(data.roles ?? []).map((r) => <option key={String(r.id)} value={String(r.id)}>{String(r.title)}</option>)}</select></Field>
+            <Field label="Application/check reference"><Input required value={verificationRef} onChange={(e) => setVerificationRef(e.target.value)} placeholder="SYN-CHECK-001" /></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.workerVerification)} aria-busy={isPending(FORM_KEYS.workerVerification)}>Record current screening verification</Button>{message(FORM_KEYS.workerVerification)}
+          </form>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.competenceEvidence, "cmd_admin_record_competence_evidence", { p_organisation_id: organisationId, p_worker_membership_id: worker || String(syntheticWorker?.membership_id ?? ""), p_requirement_id: requirement, p_evidence_type: "induction", p_issuer: "Synthetic Provider", p_evidence_reference: evidenceRef, p_verifier_name: "Synthetic Admin", p_assessed_state: "met", p_limitation: "", p_expires_at: new Date(Date.now() + 31536000000).toISOString(), p_effective_from: new Date().toISOString(), p_effective_until: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Required competence"><Input required value={requirement} onChange={(e) => setRequirement(e.target.value)} placeholder="Requirement ID from provider policy" /></Field><Field label="Evidence reference"><Input required value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} placeholder="SYN-COMP-001" /></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.competenceEvidence)} aria-busy={isPending(FORM_KEYS.competenceEvidence)}>Record competence evidence</Button>{message(FORM_KEYS.competenceEvidence)}
+          </form>
+          <div className="border-t pt-4 text-xs text-muted-foreground"><strong>Screening policy:</strong> registered risk-assessed roles are always required; registered non-risk roles follow the registration baseline unless provider policy is stricter; unregistered roles require an explicit effective provider decision. There is no generic override.</div>
+        </CardContent></Card>
+        <Card><CardHeader><CardTitle>6–10. Context, shift snapshot and acknowledgement</CardTitle><CardDescription>Only active, reviewed, current contexts schedule. Snapshot fields are immutable; acknowledgement is provider-recorded and never proof of participant authentication, consent or payment.</CardDescription></CardHeader><CardContent className="space-y-4">
+          <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void call(FORM_KEYS.contextState, "cmd_admin_update_service_context_state", { p_organisation_id: organisationId, p_context_id: context, p_lifecycle_state: contextState, p_reviewer_profile_id: null, p_reason: "Admin readiness review", p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Service context"><select required className={inputBase} value={context} onChange={(e) => setContext(e.target.value)}><option value="">Choose context</option>{(data.serviceContexts ?? []).map((c) => <option key={String(c.id)} value={String(c.id)}>{String(c.goal_reference)} · {String(c.lifecycle_state)}</option>)}</select></Field>
+            <Field label="Lifecycle state"><select className={inputBase} value={contextState} onChange={(e) => setContextState(e.target.value)}><option value="active">Active reviewed</option><option value="review_required">Review required</option><option value="superseded">Superseded</option><option value="withdrawn">Withdrawn</option></select></Field>
+            <Button type="submit" disabled={isPending(FORM_KEYS.contextState)} aria-busy={isPending(FORM_KEYS.contextState)}>Save context lifecycle</Button>{message(FORM_KEYS.contextState)}
+          </form>
+          <div className="rounded-md border bg-muted/20 p-3 text-sm"><strong>Readiness result:</strong> {selectedContext && selectedContext.lifecycle_state === "active" ? "Active context selected; use roster to create a service-ready shift." : "Not ready — activate a reviewed context and complete worker evidence. Recovery reasons are retained by the server."}</div>
+          <form className="space-y-3 border-t pt-4" onSubmit={(e) => { e.preventDefault(); const participantProfile = signer || String(participantIdentity?.profile_id ?? ""); void call(FORM_KEYS.acknowledgement, "cmd_admin_record_acknowledgement", { p_organisation_id: organisationId, p_shift_id: shift, p_event_class: ackMode, p_event_type: ackMode === "attempt" ? "unavailable_attempt" : "external_signed_evidence", p_reported_signer_profile_id: ackMode === "attempt" ? null : participantProfile, p_authority_type: ackMode === "attempt" ? null : "participant_self", p_method: ackMode === "attempt" ? null : "external_signed", p_occurred_at: new Date().toISOString(), p_reason: ackMode === "attempt" ? "Signer unavailable" : "Provider-recorded attestation", p_external_evidence_reference: ackMode === "attempt" ? null : "SYN-ACK-001", p_expected_current_event_id: null, p_payload: { source: "admin-readiness" } }); }}>
+            <Field label="Service record"><select required className={inputBase} value={shift} onChange={(e) => setShift(e.target.value)}><option value="">Choose shift</option>{data.shifts.map((s) => <option key={String(s.id)} value={String(s.id)}>{String(s.id).slice(0, 8)} · {String(s.state)}</option>)}</select></Field>
+            <Field label="Acknowledgement event"><select className={inputBase} value={ackMode} onChange={(e) => setAckMode(e.target.value)}><option value="attempt">Attempt — unavailable</option><option value="conclusive">Provider-recorded signed evidence</option></select></Field>
+            {ackMode === "conclusive" ? <Field label="Reported signer"><select required className={inputBase} value={signer} onChange={(e) => setSigner(e.target.value)}><option value="">Choose participant self</option>{participantIdentity ? <option value={String(participantIdentity.profile_id)}>{String(participantIdentity.full_name ?? participantIdentity.profile_id)}</option> : null}</select></Field> : null}
+            <Button type="submit" disabled={isPending(FORM_KEYS.acknowledgement)} aria-busy={isPending(FORM_KEYS.acknowledgement)}>Record provider acknowledgement</Button>{message(FORM_KEYS.acknowledgement)}
+          </form>
+          <p className="text-xs text-muted-foreground">{selectedShift ? `Snapshot/readiness is attached to ${String(selectedShift.id).slice(0, 8)}…; workers cannot enter billable duration.` : "Select a service record to inspect the immutable snapshot and acknowledgement ledger."}</p>
+        </CardContent></Card>
+      </div>
     </div>
   );
 }

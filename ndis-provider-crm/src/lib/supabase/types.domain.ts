@@ -539,6 +539,48 @@ export interface AdminCreateShiftRpcArgs {
 
 export type AdminCreateServiceReadyShiftRpcArgs = AdminCreateShiftRpcArgs;
 
+export interface AdminProviderScopeRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_registration_state: "registered" | "unregistered";
+  p_registration_group: string;
+  p_class_of_support: string;
+  p_jurisdictions: string[];
+  p_effective_from: IsoTimestamp;
+  p_effective_until: IsoTimestamp | null;
+  p_reviewed_by: UUID | null;
+  p_payload: Record<string, unknown>;
+}
+
+export interface AdminSupportCapabilityRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_scope_version_id: UUID;
+  p_support_category: string;
+  p_service_kind: string;
+  p_capability: "individual_time_supported" | "specialist_phased" | "not_supported";
+  p_effective_from: IsoTimestamp;
+  p_effective_until: IsoTimestamp | null;
+  p_payload: Record<string, unknown>;
+}
+
+export interface AdminCatalogueItemRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_source_label: string;
+  p_source_version: string;
+  p_catalogue_effective_from: IsoTimestamp;
+  p_catalogue_effective_until: IsoTimestamp | null;
+  p_item_code: string;
+  p_item_name: string;
+  p_support_category: string;
+  p_time_unit: "hour" | "minute";
+  p_service_kind: string;
+  p_item_effective_from: IsoTimestamp;
+  p_item_effective_until: IsoTimestamp | null;
+  p_payload: Record<string, unknown>;
+}
+
 export interface ParticipantServiceContextVersion {
   id: UUID;
   organisation_id: UUID;

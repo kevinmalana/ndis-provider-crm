@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
 import { bootTestDb, type Executor } from "./harness";
 import { seedStandardFixture, type Fixture } from "./fixtures";
 
@@ -14,6 +15,13 @@ describe("05b hardening invariants", () => {
     const otherOrg = "99999999-9999-4999-8999-999999999901";
     await ex.execAsService(`insert into public.organisations(id,name,slug) values ('${otherOrg}','Other','other')`);
     await expect(ex.execAsService(`insert into public.participant_service_context_versions(organisation_id,participant_id,capability_id,catalogue_item_id,external_agreement_reference,source_type,owner_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state) select '${otherOrg}', '${fx.participantId}', capability_id, catalogue_item_id, 'x','provider','${fx.adminUid}','2026-08-06','2026-09-01','x','x','x','draft' from public.participant_service_context_versions where id='${fx.contextId}'`)).rejects.toThrow();
+  });
+
+  it("is safe to apply a second time after data exists", async () => {
+    const migration = fs.readFileSync(new URL("../../supabase/migrations/0009_provider_readiness_service_evidence.sql", import.meta.url), "utf8");
+    await expect(ex.raw.exec(migration)).resolves.toBeDefined();
+    const counts = await ex.execAsService(`select count(*)::int as snapshots from public.shift_service_snapshots where shift_id='${fx.shiftId}'`);
+    expect(counts.rows[0]).toMatchObject({ snapshots: 1 });
   });
 
   it("keeps attempts separate and resolves an immutable conclusive chain", async () => {

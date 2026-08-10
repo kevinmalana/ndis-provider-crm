@@ -28,6 +28,9 @@ import type {
   AdminCommandResult,
   AdminCreateParticipantRpcArgs,
   AdminCreateShiftRpcArgs,
+  AdminProviderScopeRpcArgs,
+  AdminSupportCapabilityRpcArgs,
+  AdminCatalogueItemRpcArgs,
 } from "@/lib/supabase/types.domain";
 
 type RpcClient = SupabaseClient;
@@ -197,3 +200,24 @@ export const cmdAdminCreateServiceReadyShift = cmdAdminCreateShift;
 
 export const cmdAdminRevealParticipantNdisIdentifier = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_reveal_participant_ndis_identifier", args);
+
+export const cmdAdminCreateProviderScopeVersion = (client: RpcClient, args: AdminProviderScopeRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_provider_scope_version", args as unknown as Record<string, unknown>);
+
+export const cmdAdminCreateSupportCapability = (client: RpcClient, args: AdminSupportCapabilityRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_support_capability", args as unknown as Record<string, unknown>);
+
+export const cmdAdminCreateCatalogueItem = (client: RpcClient, args: AdminCatalogueItemRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_catalogue_item", args as unknown as Record<string, unknown>);
+
+export const cmdAdminRecordWorkerVerification = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_record_worker_verification", args);
+
+export const cmdAdminRecordCompetenceEvidence = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_record_competence_evidence", args);
+
+export const cmdAdminUpdateServiceContextState = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_update_service_context_state", args);
+
+export const cmdAdminRecordAcknowledgement = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_record_acknowledgement", args);

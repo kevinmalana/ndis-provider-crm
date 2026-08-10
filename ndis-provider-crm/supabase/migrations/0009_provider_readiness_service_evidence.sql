@@ -659,4 +659,114 @@ revoke all on function public.cmd_admin_record_acknowledgement(text,uuid,uuid,te
 revoke all on function public.cmd_admin_record_acknowledgement(text,uuid,uuid,text,text,uuid,text,text,timestamptz,text,text,uuid,jsonb) from anon;
 grant execute on function public.cmd_admin_record_acknowledgement(text,uuid,uuid,text,text,uuid,text,text,timestamptz,text,text,uuid,jsonb) to authenticated;
 
+------------------------------------------------------------------------
+-- Typed administration commands and safe office projections
+------------------------------------------------------------------------
+create or replace function public.require_05b_admin_or_scheduler(p_organisation_id uuid, p_admin_only boolean default false)
+returns uuid language plpgsql security definer set search_path = '' as $$
+declare m uuid; r text;
+begin
+  m:=public.current_membership(p_organisation_id); r:=public.current_user_membership_role();
+  if m is null or (p_admin_only and r<>'admin') or (not p_admin_only and r not in ('admin','scheduler')) then raise exception 'admin_or_scheduler_required' using errcode='42501'; end if;
+  return m;
+end $$;
+revoke all on function public.require_05b_admin_or_scheduler(uuid,boolean) from public;
+revoke all on function public.require_05b_admin_or_scheduler(uuid,boolean) from anon;
+
+create or replace function public.cmd_admin_create_provider_scope_version(p_command_id text,p_organisation_id uuid,p_registration_state text,p_registration_group text,p_class_of_support text,p_jurisdictions text[],p_effective_from timestamptz,p_effective_until timestamptz,p_reviewed_by uuid,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare actor uuid; r record; row_id uuid; out jsonb;
+begin
+  actor:=public.require_05b_admin_or_scheduler(p_organisation_id,true); if p_registration_state not in ('registered','unregistered') or p_jurisdictions is null or cardinality(p_jurisdictions)=0 or p_effective_until is not null and p_effective_until<=p_effective_from then raise exception 'provider_scope_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_provider_scope',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  insert into public.organisation_provider_scope_versions(organisation_id,registration_state,registration_group,class_of_support,jurisdictions,effective_from,effective_until,authored_by,reviewed_by) values(p_organisation_id,p_registration_state,nullif(pg_catalog.btrim(p_registration_group),''),nullif(pg_catalog.btrim(p_class_of_support),''),p_jurisdictions,p_effective_from,p_effective_until,auth.uid(),p_reviewed_by) returning id into row_id;
+  out:=pg_catalog.jsonb_build_object('scope_version_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_create_provider_scope_version(text,uuid,text,text,text,text[],timestamptz,timestamptz,uuid,jsonb) from public;
+revoke all on function public.cmd_admin_create_provider_scope_version(text,uuid,text,text,text,text[],timestamptz,timestamptz,uuid,jsonb) from anon;
+grant execute on function public.cmd_admin_create_provider_scope_version(text,uuid,text,text,text,text[],timestamptz,timestamptz,uuid,jsonb) to authenticated;
+
+create or replace function public.cmd_admin_create_support_capability(p_command_id text,p_organisation_id uuid,p_scope_version_id uuid,p_support_category text,p_service_kind text,p_capability text,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r record; row_id uuid; out jsonb;
+begin
+  perform public.require_05b_admin_or_scheduler(p_organisation_id,true); if p_capability not in ('individual_time_supported','specialist_phased','not_supported') or nullif(pg_catalog.btrim(p_support_category),'') is null or nullif(pg_catalog.btrim(p_service_kind),'') is null or not exists(select 1 from public.organisation_provider_scope_versions s where s.id=p_scope_version_id and s.organisation_id=p_organisation_id) then raise exception 'support_capability_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_provider_scope',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  insert into public.organisation_support_capabilities(organisation_id,scope_version_id,support_category,service_kind,capability,effective_from,effective_until) values(p_organisation_id,p_scope_version_id,pg_catalog.btrim(p_support_category),pg_catalog.btrim(p_service_kind),p_capability,p_effective_from,p_effective_until) returning id into row_id;
+  out:=pg_catalog.jsonb_build_object('capability_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_create_support_capability(text,uuid,uuid,text,text,text,timestamptz,timestamptz,jsonb) from public;
+revoke all on function public.cmd_admin_create_support_capability(text,uuid,uuid,text,text,text,timestamptz,timestamptz,jsonb) from anon;
+grant execute on function public.cmd_admin_create_support_capability(text,uuid,uuid,text,text,text,timestamptz,timestamptz,jsonb) to authenticated;
+
+create or replace function public.cmd_admin_create_catalogue_item(p_command_id text,p_organisation_id uuid,p_source_label text,p_source_version text,p_catalogue_effective_from timestamptz,p_catalogue_effective_until timestamptz,p_item_code text,p_item_name text,p_support_category text,p_time_unit text,p_service_kind text,p_item_effective_from timestamptz,p_item_effective_until timestamptz,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r record; cv uuid; item uuid; out jsonb;
+begin
+  perform public.require_05b_admin_or_scheduler(p_organisation_id,true); if nullif(pg_catalog.btrim(p_source_label),'') is null or nullif(pg_catalog.btrim(p_source_version),'') is null or nullif(pg_catalog.btrim(p_item_code),'') is null or nullif(pg_catalog.btrim(p_item_name),'') is null or p_time_unit not in ('hour','minute') then raise exception 'catalogue_item_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_catalogue',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  insert into public.provider_support_catalogue_versions(organisation_id,source_label,source_version,effective_from,effective_until,created_by) values(p_organisation_id,pg_catalog.btrim(p_source_label),pg_catalog.btrim(p_source_version),p_catalogue_effective_from,p_catalogue_effective_until,auth.uid()) returning id into cv;
+  insert into public.provider_support_items(organisation_id,catalogue_version_id,item_code,item_name,support_category,time_unit,service_kind,effective_from,effective_until) values(p_organisation_id,cv,pg_catalog.btrim(p_item_code),pg_catalog.btrim(p_item_name),pg_catalog.btrim(p_support_category),p_time_unit,pg_catalog.btrim(p_service_kind),p_item_effective_from,p_item_effective_until) returning id into item;
+  out:=pg_catalog.jsonb_build_object('catalogue_version_id',cv,'catalogue_item_id',item); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_create_catalogue_item(text,uuid,text,text,timestamptz,timestamptz,text,text,text,text,text,timestamptz,timestamptz,jsonb) from public;
+revoke all on function public.cmd_admin_create_catalogue_item(text,uuid,text,text,timestamptz,timestamptz,text,text,text,text,text,timestamptz,timestamptz,jsonb) from anon;
+grant execute on function public.cmd_admin_create_catalogue_item(text,uuid,text,text,timestamptz,timestamptz,text,text,text,text,text,timestamptz,timestamptz,jsonb) to authenticated;
+
+create or replace function public.cmd_admin_record_worker_verification(p_command_id text,p_organisation_id uuid,p_worker_membership_id uuid,p_role_version_id uuid,p_source_checked text,p_verifier_name text,p_verified_at timestamptz,p_application_or_check_reference text,p_clearance_status text,p_clearance_expires_at timestamptz,p_interim_bar boolean,p_suspension boolean,p_exclusion boolean,p_revocation boolean,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r record; row_id uuid; out jsonb;
+begin
+  perform public.require_05b_admin_or_scheduler(p_organisation_id,false); if not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and m.role='worker') or not exists(select 1 from public.risk_assessed_role_versions v where v.id=p_role_version_id and v.organisation_id=p_organisation_id) or nullif(pg_catalog.btrim(p_source_checked),'') is null or nullif(pg_catalog.btrim(p_verifier_name),'') is null or nullif(pg_catalog.btrim(p_application_or_check_reference),'') is null then raise exception 'screening_verification_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  insert into public.worker_screening_verification_versions(organisation_id,worker_membership_id,role_version_id,source_checked,verifier_name,verified_at,application_or_check_reference,clearance_status,clearance_expires_at,interim_bar,suspension,exclusion,revocation,effective_from,effective_until,created_by) values(p_organisation_id,p_worker_membership_id,p_role_version_id,pg_catalog.btrim(p_source_checked),pg_catalog.btrim(p_verifier_name),p_verified_at,pg_catalog.btrim(p_application_or_check_reference),p_clearance_status,p_clearance_expires_at,p_interim_bar,p_suspension,p_exclusion,p_revocation,p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
+  out:=pg_catalog.jsonb_build_object('verification_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_record_worker_verification(text,uuid,uuid,uuid,text,text,timestamptz,text,text,timestamptz,boolean,boolean,boolean,boolean,timestamptz,timestamptz,jsonb) from public;
+revoke all on function public.cmd_admin_record_worker_verification(text,uuid,uuid,uuid,text,text,timestamptz,text,text,timestamptz,boolean,boolean,boolean,boolean,timestamptz,timestamptz,jsonb) from anon;
+grant execute on function public.cmd_admin_record_worker_verification(text,uuid,uuid,uuid,text,text,timestamptz,text,text,timestamptz,boolean,boolean,boolean,boolean,timestamptz,timestamptz,jsonb) to authenticated;
+
+create or replace function public.cmd_admin_record_competence_evidence(p_command_id text,p_organisation_id uuid,p_worker_membership_id uuid,p_requirement_id uuid,p_evidence_type text,p_issuer text,p_evidence_reference text,p_verifier_name text,p_assessed_state text,p_limitation text,p_expires_at timestamptz,p_effective_from timestamptz,p_effective_until timestamptz,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r record; row_id uuid; out jsonb;
+begin
+  perform public.require_05b_admin_or_scheduler(p_organisation_id,false); if not exists(select 1 from public.organisation_memberships m where m.id=p_worker_membership_id and m.organisation_id=p_organisation_id and m.role='worker') or not exists(select 1 from public.role_competence_requirements q where q.id=p_requirement_id and q.organisation_id=p_organisation_id and q.requirement_state='required') or nullif(pg_catalog.btrim(p_evidence_reference),'') is null or p_assessed_state not in ('met','not_met','pending') then raise exception 'competence_evidence_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_worker_readiness',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  insert into public.worker_competence_evidence_versions(organisation_id,worker_membership_id,requirement_id,evidence_type,issuer,evidence_reference,verifier_name,assessed_state,limitation,expires_at,effective_from,effective_until,created_by) values(p_organisation_id,p_worker_membership_id,p_requirement_id,pg_catalog.btrim(p_evidence_type),pg_catalog.btrim(p_issuer),pg_catalog.btrim(p_evidence_reference),pg_catalog.btrim(p_verifier_name),p_assessed_state,nullif(pg_catalog.btrim(p_limitation),''),p_expires_at,p_effective_from,p_effective_until,auth.uid()) returning id into row_id;
+  out:=pg_catalog.jsonb_build_object('competence_evidence_id',row_id); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_record_competence_evidence(text,uuid,uuid,uuid,text,text,text,text,text,text,timestamptz,timestamptz,timestamptz,jsonb) from public;
+revoke all on function public.cmd_admin_record_competence_evidence(text,uuid,uuid,uuid,text,text,text,text,text,text,timestamptz,timestamptz,timestamptz,jsonb) from anon;
+grant execute on function public.cmd_admin_record_competence_evidence(text,uuid,uuid,uuid,text,text,text,text,text,text,timestamptz,timestamptz,timestamptz,jsonb) to authenticated;
+
+create or replace function public.cmd_admin_update_service_context_state(p_command_id text,p_organisation_id uuid,p_context_id uuid,p_lifecycle_state text,p_reviewer_profile_id uuid,p_reason text,p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare r record; out jsonb;
+begin
+  perform public.require_05b_admin_or_scheduler(p_organisation_id,true); if p_lifecycle_state not in ('draft','active','review_required','superseded','withdrawn','expired') then raise exception 'context_lifecycle_invalid'; end if;
+  select * into r from public.reserve_admin_command(p_command_id,'admin_service_context',p_organisation_id,p_payload); if not r.is_new then return pg_catalog.jsonb_build_object('status','duplicate_returned','duplicate',true,'receipt_id',r.receipt_id,'outcome',r.outcome); end if;
+  update public.participant_service_context_versions set lifecycle_state=p_lifecycle_state,reviewer_profile_id=coalesce(p_reviewer_profile_id,reviewer_profile_id) where id=p_context_id and organisation_id=p_organisation_id;
+  if not found then raise exception 'context_not_found'; end if;
+  out:=pg_catalog.jsonb_build_object('service_context_id',p_context_id,'lifecycle_state',p_lifecycle_state,'reason',nullif(pg_catalog.btrim(p_reason),'')); perform public.finalize_admin_command(r.receipt_id,out); return pg_catalog.jsonb_build_object('status','accepted','receipt_id',r.receipt_id)||out;
+end $$;
+revoke all on function public.cmd_admin_update_service_context_state(text,uuid,uuid,text,uuid,text,jsonb) from public;
+revoke all on function public.cmd_admin_update_service_context_state(text,uuid,uuid,text,uuid,text,jsonb) from anon;
+grant execute on function public.cmd_admin_update_service_context_state(text,uuid,uuid,text,uuid,text,jsonb) to authenticated;
+
+create or replace function public.list_admin_provider_readiness(p_organisation_id uuid,p_worker_membership_id uuid,p_context_id uuid,p_scheduled_start timestamptz,p_scheduled_end timestamptz)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  select public.provider_readiness(p_organisation_id,p_worker_membership_id,p_context_id,p_scheduled_start,p_scheduled_end)
+$$;
+revoke all on function public.list_admin_provider_readiness(uuid,uuid,uuid,timestamptz,timestamptz) from public;
+revoke all on function public.list_admin_provider_readiness(uuid,uuid,uuid,timestamptz,timestamptz) from anon;
+grant execute on function public.list_admin_provider_readiness(uuid,uuid,uuid,timestamptz,timestamptz) to authenticated;
+
+create or replace function public.list_admin_acknowledgement_ledger(p_organisation_id uuid,p_shift_id uuid)
+returns table(id uuid,event_class text,event_type text,source_channel text,authority_type text,method text,occurred_at timestamptz,external_evidence_reference text,reason text,review_only boolean,current_leaf boolean) language sql stable security definer set search_path = '' as $$
+  select e.id,e.event_class,e.event_type,e.source_channel,e.authority_type,e.method,e.occurred_at,e.external_evidence_reference,e.reason,e.review_only,(c.id is not null) from public.service_acknowledgement_events e left join public.service_acknowledgement_current c on c.id=e.id where e.organisation_id=p_organisation_id and e.shift_id=p_shift_id and public.current_user_membership_role() in ('admin','scheduler') order by e.created_at
+$$;
+revoke all on function public.list_admin_acknowledgement_ledger(uuid,uuid) from public;
+revoke all on function public.list_admin_acknowledgement_ledger(uuid,uuid) from anon;
+grant execute on function public.list_admin_acknowledgement_ledger(uuid,uuid) to authenticated;
+
 commit;
