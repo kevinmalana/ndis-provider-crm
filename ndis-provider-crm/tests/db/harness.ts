@@ -238,6 +238,14 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "screening_decision_authority", type: "text" }, { name: "screening_evidence_reference", type: "text" }, { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_admin_record_acknowledgement: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "shift_id", type: "uuid" },
+      { name: "event_class", type: "text" }, { name: "event_type", type: "text" }, { name: "reported_signer_profile_id", type: "uuid" },
+      { name: "authority_type", type: "text" }, { name: "method", type: "text" }, { name: "occurred_at", type: "timestamptz" },
+      { name: "reason", type: "text" }, { name: "external_evidence_reference", type: "text" }, { name: "expected_current_event_id", type: "uuid" }, { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_admin_create_grant: {
     params: [
       { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" }, { name: "consent_id", type: "uuid" },
