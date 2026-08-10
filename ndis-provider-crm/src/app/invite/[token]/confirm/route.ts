@@ -57,12 +57,23 @@ export async function POST(
   }
 
   const supabase = await createSupabaseServerClient();
-  await supabase.auth.signInWithOtp({
+  const callbackUrl = new URL("/auth/callback", origin);
+  callbackUrl.searchParams.set("invitation", token);
+  callbackUrl.searchParams.set("next", "/app");
+
+  const { error: otpError } = await supabase.auth.signInWithOtp({
     email: view.email,
     options: {
-      emailRedirectTo: `${origin}/invite/${encodeURIComponent(token)}`,
+      emailRedirectTo: callbackUrl.toString(),
     },
   });
+
+  if (otpError) {
+    return NextResponse.redirect(
+      `${origin}/invite/${encodeURIComponent(token)}?error=email`,
+      { status: 303 },
+    );
+  }
 
   return NextResponse.redirect(
     `${origin}/invite/${encodeURIComponent(token)}?sent=1`,

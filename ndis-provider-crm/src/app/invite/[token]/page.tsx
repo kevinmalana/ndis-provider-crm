@@ -1,5 +1,3 @@
-import { redirect } from "next/navigation";
-
 import {
   Card,
   CardContent,
@@ -9,7 +7,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { InviteFragmentHandler } from "./fragment-handler";
 
@@ -28,7 +25,7 @@ interface InvitationView {
 
 interface PageProps {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ code?: string; sent?: string }>;
+  searchParams: Promise<{ sent?: string; error?: string }>;
 }
 
 async function loadInvitation(token: string): Promise<InvitationView | null> {
@@ -110,11 +107,13 @@ function ValidView({
   email,
   role,
   organisation,
+  sendError,
 }: {
   token: string;
   email: string;
   role: string;
   organisation: string;
+  sendError: boolean;
 }) {
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-12">
@@ -132,6 +131,12 @@ function ValidView({
             Accepting will email you a one-time sign-in link. Click it to
             finish joining {organisation}.
           </p>
+          {sendError ? (
+            <p className="mt-3 text-sm text-destructive" role="alert">
+              The sign-in email could not be sent. Please wait a moment and
+              try again.
+            </p>
+          ) : null}
         </CardContent>
         <CardFooter>
           <form
@@ -154,18 +159,7 @@ export default async function InvitePage({
   searchParams,
 }: PageProps) {
   const { token } = await params;
-  const { code, sent } = await searchParams;
-
-  if (code) {
-    const supabase = await createSupabaseServerClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      const accepted = await supabase.rpc("cmd_accept_invitation", {
-        p_token: token,
-      });
-      redirect(accepted.error ? `/invite/${encodeURIComponent(token)}/expired` : "/app");
-    }
-  }
+  const { sent, error } = await searchParams;
 
   const view = await loadInvitation(token);
   // Server component, runs once per request — Date.now() is fine here
@@ -206,6 +200,7 @@ export default async function InvitePage({
         email={view.email}
         role={view.role}
         organisation={view.organisation_name}
+        sendError={error === "email"}
       />
     </>
   );

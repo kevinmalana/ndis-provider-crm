@@ -32,7 +32,8 @@ export function SignInForm() {
       const { error: otpError } = await supabase.auth.signInWithOtp({
         email,
         options: {
-          emailRedirectTo: `${appUrl}/auth/callback`,
+          emailRedirectTo: `${appUrl}/auth/callback?next=/app`,
+          shouldCreateUser: false,
         },
       });
       if (otpError) {
