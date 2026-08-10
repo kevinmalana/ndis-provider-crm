@@ -37,4 +37,15 @@ describe("magic-link authentication contract", () => {
     const callback = read("src/app/auth/callback/route.ts");
     expect(callback).toContain('value.startsWith("//")');
   });
+
+  it("never requires or bundles the private server key in browser auth", () => {
+    const client = read("src/lib/supabase/client.ts");
+    const publicEnv = read("src/lib/supabase/env-public.ts");
+    const serverEnv = read("src/lib/supabase/env-server.ts");
+    expect(client).toContain("getSupabasePublicEnv");
+    expect(client).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
+    expect(publicEnv).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
+    expect(serverEnv).toContain('import "server-only"');
+    expect(serverEnv).toContain("SUPABASE_SERVICE_ROLE_KEY");
+  });
 });

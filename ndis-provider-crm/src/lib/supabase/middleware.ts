@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
-import { getSupabaseEnv } from "./env";
+import { getSupabasePublicEnv } from "./env-public";
 
 /**
  * Refreshes the Supabase session cookies on every non-static request.
@@ -21,7 +21,7 @@ import { getSupabaseEnv } from "./env";
 export async function updateSession(request: NextRequest): Promise<NextResponse> {
   let response = NextResponse.next({ request });
 
-  const { url, anonKey } = getSupabaseEnv();
+  const { url, anonKey } = getSupabasePublicEnv();
 
   const supabase = createServerClient(url, anonKey, {
     cookies: {

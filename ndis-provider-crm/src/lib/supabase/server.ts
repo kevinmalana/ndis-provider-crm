@@ -4,10 +4,10 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { getSupabaseEnv } from "./env";
+import { getSupabasePublicEnv } from "./env-public";
 
 export async function createSupabaseServerClient(): Promise<SupabaseClient> {
-  const { url, anonKey } = getSupabaseEnv();
+  const { url, anonKey } = getSupabasePublicEnv();
 
   const cookieStore = await cookies();
 
