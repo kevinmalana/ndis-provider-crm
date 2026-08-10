@@ -21,6 +21,7 @@ const MIGRATION_NAMES = [
   "0008_admin_workspace_rpcs.sql",
   "0008b_admin_repeat_review_db_fixup.sql",
   "0008c_admin_final_security_lineage_fixup.sql",
+  "0009_provider_readiness_service_evidence.sql",
 ];
 
 export default MIGRATION_NAMES.map((name) =>
