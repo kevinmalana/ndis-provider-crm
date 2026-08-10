@@ -1,4 +1,4 @@
-import { useEffect, useRef, type HTMLAttributes, type ReactNode } from "react"
+import { useEffect, useRef, type CSSProperties, type HTMLAttributes, type ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -41,12 +41,15 @@ function FormError({ id, className, children, ...props }: FormErrorProps) {
   )
 }
 
-function StickyActionBar({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+function StickyActionBarInternal({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("focus-safe-sticky-action", className)} {...props} />
 }
 
-type StickyActionLayoutProps = HTMLAttributes<HTMLDivElement> & {
+type StickyActionLayoutProps = Omit<HTMLAttributes<HTMLDivElement>, "style"> & {
   actionBar: ReactNode
+  /** A definite CSS height for the scrolling container (for example 18rem or 70vh). */
+  height: CSSProperties["height"]
+  style?: CSSProperties
 }
 
 /**
@@ -54,7 +57,7 @@ type StickyActionLayoutProps = HTMLAttributes<HTMLDivElement> & {
  * scroll padding equal to the rendered bar, including safe-area insets and
  * responsive wrapping, so keyboard focus cannot be hidden underneath it.
  */
-function StickyActionLayout({ actionBar, className, children, ...props }: StickyActionLayoutProps) {
+function StickyActionLayout({ actionBar, className, children, height, style, ...props }: StickyActionLayoutProps) {
   const regionRef = useRef<HTMLDivElement>(null)
   const actionRef = useRef<HTMLDivElement>(null)
 
@@ -71,13 +74,19 @@ function StickyActionLayout({ actionBar, className, children, ...props }: Sticky
   }, [])
 
   return (
-    <div ref={regionRef} className={cn("focus-safe-scroll-region", className)} {...props}>
+    <div
+      ref={regionRef}
+      className={cn("focus-safe-scroll-region", className)}
+      style={{ ...style, height }}
+      data-scroll-owner="sticky-action-layout"
+      {...props}
+    >
       <div>{children}</div>
       <div ref={actionRef}>
-        <StickyActionBar>{actionBar}</StickyActionBar>
+        <StickyActionBarInternal>{actionBar}</StickyActionBarInternal>
       </div>
     </div>
   )
 }
 
-export { AccessibleStatus, FormError, StickyActionBar, StickyActionLayout }
+export { AccessibleStatus, FormError, StickyActionLayout }

@@ -39,9 +39,15 @@ describe("accessibility rails", () => {
   it("requires a measured sticky scroll-space contract", () => {
     expect(globals).toContain("scroll-padding-block-end: var(--sticky-action-space")
     expect(globals).toContain("padding-block-end: var(--sticky-action-space")
+    expect(globals).toContain("overflow: auto")
     expect(accessibility).toContain("ResizeObserver")
     expect(accessibility).toContain("offsetHeight")
+    expect(accessibility).toContain("height: CSSProperties[\"height\"]")
+    expect(accessibility).toContain('data-scroll-owner="sticky-action-layout"')
+    expect(accessibility).not.toContain("export { AccessibleStatus, FormError, StickyActionBar")
     expect(reference).toContain("StickyActionLayout")
+    expect(reference).toContain('height="18rem"')
+    expect(reference).toContain("min-h-[32rem]")
   })
 
   it("exposes worker and ordinary target rails and constrained-mode fallbacks", () => {
