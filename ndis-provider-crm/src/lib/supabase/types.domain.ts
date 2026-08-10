@@ -510,6 +510,9 @@ export interface AdminCommandResult extends CommandResult {
   shift_id?: UUID;
   assignment_id?: UUID;
   warnings?: string[];
+  snapshot_id?: UUID;
+  readiness?: Record<string, unknown>;
+  identifier?: string;
 }
 
 export interface AdminCreateParticipantRpcArgs {
@@ -527,8 +530,27 @@ export interface AdminCreateShiftRpcArgs {
   p_organisation_id: UUID;
   p_participant_id: UUID;
   p_worker_membership: UUID;
+  p_service_context_id: UUID;
   p_scheduled_start: IsoTimestamp;
   p_scheduled_end: IsoTimestamp;
   p_reason: string;
   p_payload: Record<string, unknown>;
+}
+
+export type AdminCreateServiceReadyShiftRpcArgs = AdminCreateShiftRpcArgs;
+
+export interface ParticipantServiceContextVersion {
+  id: UUID;
+  organisation_id: UUID;
+  participant_id: UUID;
+  capability_id: UUID;
+  catalogue_item_id: UUID;
+  external_agreement_reference: string;
+  plan_reference: string | null;
+  source_type: string;
+  effective_from: IsoTimestamp;
+  effective_until: IsoTimestamp;
+  goal_reference: string;
+  goal_display: string;
+  lifecycle_state: "draft" | "active" | "review_required" | "superseded" | "withdrawn" | "expired";
 }

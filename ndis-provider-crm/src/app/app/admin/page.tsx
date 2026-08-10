@@ -14,7 +14,7 @@ export default async function AdminPage() {
 
   const supabase = await createSupabaseServerClient();
   const organisationId = ctx.active.organisation_id;
-  const [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks] = await Promise.all([
+  const [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts] = await Promise.all([
     supabase.from("participants").select("id,first_name,last_initial,created_at").eq("organisation_id", organisationId).is("archived_at", null).order("created_at", { ascending: false }),
     supabase.from("critical_info_cards").select("id,participant_id,content_text,reviewed_at,review_due_at,status").eq("organisation_id", organisationId).eq("status", "active"),
     supabase.from("organisation_memberships").select("id,profile_id,role,status,effective_from").eq("organisation_id", organisationId).eq("status", "active").order("role"),
@@ -27,9 +27,10 @@ export default async function AdminPage() {
     supabase.from("audit_log").select("id,action,subject_type,subject_id,metadata,created_at,actor").eq("organisation_id", organisationId).order("created_at", { ascending: false }).limit(50),
     supabase.rpc("list_admin_workspace_identities", { p_organisation_id: organisationId, p_roles: ["worker", "participant", "nominee", "external"] }),
     supabase.rpc("list_admin_workspace_self_links", { p_organisation_id: organisationId }),
+    supabase.from("participant_service_context_versions").select("id,participant_id,goal_reference,goal_display,effective_from,effective_until,lifecycle_state").eq("organisation_id", organisationId).eq("lifecycle_state", "active").order("effective_from", { ascending: false }),
   ]);
 
-  const readError = [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks].find((result) => result.error)?.error;
+  const readError = [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts].find((result) => result.error)?.error;
   if (readError) {
     return <section className="space-y-4 rounded-xl border border-danger/40 bg-danger/5 p-6" role="alert">
       <h1 className="text-xl font-semibold">Admin workspace could not load</h1>
@@ -55,6 +56,7 @@ export default async function AdminPage() {
         availability: availability.data ?? [],
         audit: audit.data ?? [],
         selfLinks: selfLinks.data ?? [],
+        serviceContexts: serviceContexts.data ?? [],
       }}
     />
   );

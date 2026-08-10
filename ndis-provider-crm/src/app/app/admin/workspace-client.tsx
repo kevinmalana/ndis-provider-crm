@@ -54,6 +54,7 @@ type Data = {
   availability: Array<Record<string, unknown>>;
   audit: Array<Record<string, unknown>>;
   selfLinks?: Array<Record<string, unknown>>;
+  serviceContexts?: Array<Record<string, unknown>>;
 };
 
 const isoTomorrow = () => new Date(Date.now() + 86400000).toISOString().slice(0, 16);
@@ -238,7 +239,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
       const isDuplicate = status === "duplicate_returned";
       const normalized = normalizeCommandResult(payload);
 
-      if (name === "cmd_admin_create_shift" && normalized.warnings.length > 0 && normalized.resultKey) {
+      if (name === "cmd_admin_create_service_ready_shift" && normalized.warnings.length > 0 && normalized.resultKey) {
         setFormMessage(
           formKey,
           isDuplicate
@@ -544,6 +545,7 @@ function Roster({
   formError: (formKey: FormKey) => string | null;
 }) {
   const [participant, setParticipant] = useState("");
+  const [serviceContext, setServiceContext] = useState("");
   const [worker, setWorker] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -570,10 +572,11 @@ function Roster({
               // click sends the same logical command with the same
               // command ID, returning duplicate_returned on the
               // server side until the user signals new intent.
-              void call(FORM_KEYS.createShift, "cmd_admin_create_shift", {
+              void call(FORM_KEYS.createShift, "cmd_admin_create_service_ready_shift", {
                 p_organisation_id: organisationId,
                 p_participant_id: participant,
                 p_worker_membership: worker,
+                p_service_context_id: serviceContext,
                 p_scheduled_start: new Date(start).toISOString(),
                 p_scheduled_end: new Date(end).toISOString(),
                 p_reason: reason,
@@ -591,6 +594,12 @@ function Roster({
               <select required value={worker} onChange={(e) => setWorker(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
                 <option value="">Choose worker membership</option>
                 {workers.map((w) => <option key={String(w.membership_id)} value={String(w.membership_id)}>{String(w.full_name ?? w.email ?? w.profile_id)} · worker</option>)}
+              </select>
+            </Field>
+            <Field label="Reviewed service context">
+              <select required value={serviceContext} onChange={(e) => setServiceContext(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="">Choose active reviewed context</option>
+                {(data.serviceContexts ?? []).filter((c) => !participant || String(c.participant_id) === participant).map((c) => <option key={String(c.id)} value={String(c.id)}>{String(c.goal_reference ?? c.id)} · {String(c.lifecycle_state)}</option>)}
               </select>
             </Field>
             <Field label="Scheduled start">

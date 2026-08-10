@@ -191,4 +191,9 @@ export const cmdAdminSetAvailability = (client: RpcClient, args: Record<string, 
   adminRpc(client, "cmd_admin_set_availability", args);
 
 export const cmdAdminCreateShift = (client: RpcClient, args: AdminCreateShiftRpcArgs) =>
-  adminRpc(client, "cmd_admin_create_shift", args as unknown as Record<string, unknown>);
+  adminRpc(client, "cmd_admin_create_service_ready_shift", args as unknown as Record<string, unknown>);
+
+export const cmdAdminCreateServiceReadyShift = cmdAdminCreateShift;
+
+export const cmdAdminRevealParticipantNdisIdentifier = (client: RpcClient, args: Record<string, unknown>) =>
+  adminRpc(client, "cmd_admin_reveal_participant_ndis_identifier", args);
