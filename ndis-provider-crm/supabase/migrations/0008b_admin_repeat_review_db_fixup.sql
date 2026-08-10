@@ -45,6 +45,13 @@ set search_path = '';
 alter table public.participant_consent_evidence
   add column if not exists version integer;
 
+-- The populated backfill updates rows and then tightens the column in
+-- one migration transaction. Temporarily remove the timestamp trigger
+-- so PostgreSQL has no pending trigger events when ALTER TABLE runs.
+drop trigger if exists participant_consent_evidence_set_updated_at on public.participant_consent_evidence;
+alter table public.participant_consent_evidence
+  drop constraint if exists participant_consent_evidence_superseded_by_fkey;
+
 do $$
 begin
   if exists (
@@ -87,11 +94,11 @@ begin
         recipient_profile_id,
         consent_basis,
         row_number() over (
-          partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+          partition by organisation_id, participant_id, recipient_profile_id
           order by created_at asc, id asc
         ) as new_version,
         lead(id) over (
-          partition by organisation_id, participant_id, recipient_profile_id, consent_basis
+          partition by organisation_id, participant_id, recipient_profile_id
           order by created_at asc, id asc
         ) as new_superseded_by
       from public.participant_consent_evidence
@@ -108,6 +115,17 @@ begin
       alter column version set not null;
   end if;
 end$$;
+
+create trigger participant_consent_evidence_set_updated_at
+  before update on public.participant_consent_evidence
+  for each row execute function public.set_updated_at();
+
+alter table public.participant_consent_evidence
+  add constraint participant_consent_evidence_superseded_by_fkey
+  foreign key (superseded_by)
+  references public.participant_consent_evidence(id)
+  on delete set null
+  deferrable initially deferred;
 
 create unique index if not exists participant_consent_evidence_version_uidx
   on public.participant_consent_evidence (organisation_id, participant_id, recipient_profile_id, version);
@@ -316,8 +334,8 @@ begin
     raise exception 'external_recipient_membership_required';
   end if;
 
-  -- Exactly one current consent leaf per (org, participant, recipient,
-  -- consent_basis). If an unsuperseded active row already exists, this
+  -- Exactly one current consent leaf per (org, participant, recipient),
+  -- regardless of evidence basis. If an unsuperseded row already exists, this
   -- function refuses to fork the lineage; the caller must use
   -- cmd_admin_renew_consent with expected_current_consent_id instead.
   if exists (
@@ -326,7 +344,6 @@ begin
     where organisation_id      = p_organisation_id
       and participant_id       = p_participant_id
       and recipient_profile_id = p_recipient_profile_id
-      and consent_basis        = p_consent_basis
       and superseded_by        is null
   ) then
     raise exception 'consent_lineage_exists';
@@ -484,6 +501,7 @@ declare
   v_reserved          record;
   v_outcome           jsonb;
   v_next_version      integer;
+  v_new_id            uuid;
 begin
   v_membership := public.admin_context(p_organisation_id);
 
@@ -609,6 +627,29 @@ begin
     raise exception 'external_recipient_membership_required';
   end if;
 
+  -- Allocate the successor id before inserting it. The current-leaf
+  -- unique index is basis-blind, so advance the predecessor first;
+  -- the whole transaction rolls back if the successor insert fails.
+  v_new_id := pg_catalog.gen_random_uuid();
+  update public.participant_consent_evidence
+    set superseded_by = v_new_id,
+        updated_at    = pg_catalog.now()
+    where id = v_current.id
+      and superseded_by is null;
+  if not found then
+    perform public.finalize_admin_command(
+      v_reserved.receipt_id,
+      pg_catalog.jsonb_build_object(
+        'conflict','concurrent_renewal',
+        'expected_consent_id', p_expected_current_consent_id
+      )
+    );
+    return pg_catalog.jsonb_build_object(
+      'status','conflict_preserved','reason','concurrent_renewal',
+      'receipt_id', v_reserved.receipt_id
+    );
+  end if;
+
   select coalesce(max(version), 0) + 1 into v_next_version
   from public.participant_consent_evidence
   where organisation_id    = p_organisation_id
@@ -616,7 +657,7 @@ begin
     and recipient_profile_id = v_current.recipient_profile_id;
 
   insert into public.participant_consent_evidence (
-    organisation_id, participant_id, recipient_profile_id, authorising_profile_id,
+    id, organisation_id, participant_id, recipient_profile_id, authorising_profile_id,
     consent_basis, purpose, scope_categories, evidence_reference,
     effective_from, effective_until, version,
     representative_authority_id, authority_scope_snapshot,
@@ -624,7 +665,7 @@ begin
     created_by
   )
   values (
-    p_organisation_id, v_current.participant_id, v_current.recipient_profile_id, v_current.authorising_profile_id,
+    v_new_id, p_organisation_id, v_current.participant_id, v_current.recipient_profile_id, v_current.authorising_profile_id,
     v_current.consent_basis, pg_catalog.btrim(p_purpose), p_scope_categories, pg_catalog.btrim(p_evidence_reference),
     p_effective_from, p_effective_until, v_next_version,
     v_current.representative_authority_id, coalesce(v_authority.scope_categories, v_current.authority_scope_snapshot),
@@ -633,48 +674,6 @@ begin
     auth.uid()
   )
   returning * into v_new;
-
-  -- Mark the prior current as superseded by the new consent. The
-  -- predecessor update is conditional on superseded_by IS NULL — a
-  -- concurrent renewal that already advanced the chain leaves the
-  -- current row's edge unchanged; this renewal is preserved as
-  -- conflict evidence and never rewrites an existing edge.
-  update public.participant_consent_evidence
-    set superseded_by = v_new.id,
-        updated_at    = pg_catalog.now()
-    where id              = v_current.id
-      and superseded_by  is null;
-  if not found then
-    -- Concurrent renewal: the prior leaf has already been superseded
-    -- by another actor between our chain walk and our update. The new
-    -- consent row is still inserted (history is preserved), but its
-    -- superseded_by edge is not stamped onto the prior leaf — that
-    -- edge already belongs to the concurrent renewal. Surface the
-    -- conflict as evidence rather than silently dropping the row or
-    -- rewriting an edge.
-    perform public.finalize_admin_command(
-      v_reserved.receipt_id,
-      pg_catalog.jsonb_build_object(
-        'consent_id', v_new.id,
-        'conflict', 'concurrent_renewal',
-        'expected_consent_id', p_expected_current_consent_id
-      )
-    );
-    insert into public.audit_log(organisation_id, actor, action, subject_type, subject_id, metadata)
-    values (
-      p_organisation_id, auth.uid(), 'consent.renewed.concurrent',
-      'participant_consent_evidence', v_new.id,
-      pg_catalog.jsonb_build_object(
-        'expected_consent_id', p_expected_current_consent_id,
-        'version', v_next_version
-      )
-    );
-    return pg_catalog.jsonb_build_object(
-      'status','conflict_preserved','reason','concurrent_renewal',
-      'consent_id', v_new.id,
-      'receipt_id', v_reserved.receipt_id
-    );
-  end if;
 
   insert into public.audit_log(organisation_id, actor, action, subject_type, subject_id, metadata)
   values (

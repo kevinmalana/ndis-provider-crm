@@ -20,6 +20,7 @@ const MIGRATION_NAMES = [
   "0007_synthetic_seed_rpc.sql",
   "0008_admin_workspace_rpcs.sql",
   "0008b_admin_repeat_review_db_fixup.sql",
+  "0008c_admin_final_security_lineage_fixup.sql",
 ];
 
 export default MIGRATION_NAMES.map((name) =>

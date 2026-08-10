@@ -46,8 +46,10 @@
  *      even when the harness blanket grants are present (no masking).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { bootTestDb, type Executor } from "./harness";
-import { seedStandardFixture, type Fixture } from "./fixtures";
+import { seedOrgAInactiveMemberships, seedStandardFixture, type Fixture } from "./fixtures";
 
 let ex: Executor;
 let fx: Fixture;
@@ -65,6 +67,46 @@ const iso = (offsetDays: number): string =>
   new Date(Date.now() + offsetDays * 86400000).toISOString();
 
 describe("ticket 05 DB fixup — receipt helpers are actor-bound and internal-only", () => {
+  it("keeps invitation token/email private to the issuing actor across admins and tenants", async () => {
+    ex.setUser(fx.adminUid);
+    const issued = (await ex.callRpc("cmd_admin_invite", {
+      command_id: "invite-private-receipt",
+      organisation_id: fx.orgId,
+      email: "private-invite@test.example",
+      role: "worker",
+      expires_at: iso(30),
+      payload: {},
+    } as Record<string, unknown>)) as { token: string };
+    expect(issued.token).toBeTruthy();
+
+    // Same actor retains duplicate recovery, including the token in the
+    // receipt outcome; a peer admin/scheduler sees no admin_invite row.
+    const own = (await ex.exec(`
+      select outcome from public.command_receipts
+      where organisation_id='${fx.orgId}' and command_type='admin_invite'
+        and command_id='invite-private-receipt'
+    `)).rows;
+    expect(own).toHaveLength(1);
+    expect(JSON.stringify(own[0])).toContain(issued.token);
+
+    ex.setUser(fx.schedulerUid);
+    const peer = (await ex.exec(`
+      select outcome from public.command_receipts
+      where organisation_id='${fx.orgId}' and command_type='admin_invite'
+        and command_id='invite-private-receipt'
+    `)).rows;
+    expect(peer).toHaveLength(0);
+
+    const other = await seedOrgAInactiveMemberships(ex);
+    ex.setUser(other.otherOrgWorkerUid);
+    const crossTenant = (await ex.exec(`
+      select outcome from public.command_receipts
+      where organisation_id='${fx.orgId}' and command_type='admin_invite'
+        and command_id='invite-private-receipt'
+    `)).rows;
+    expect(crossTenant).toHaveLength(0);
+  });
+
   it("does not expose reserve_admin_command or finalize_admin_command to authenticated", async () => {
     const result = await ex.execAsService(`
       select proname,
@@ -424,7 +466,7 @@ describe("ticket 05 DB fixup — pre-b30 upgrade path", () => {
             'authorised_representative', 'dup', array['service_summary']::text[], 'dup',
             now(), now() + interval '30 days', 1, '${fx.schedulerUid}')`,
       ),
-    ).rejects.toThrow(/participant_consent_version_unique/);
+    ).rejects.toThrow(/participant_consent_(version_unique|evidence_version_uidx)/);
   });
 });
 
@@ -587,6 +629,75 @@ describe("ticket 05 DB fixup — supplementary admin/scheduler roles are honoure
 });
 
 describe("ticket 05 DB fixup — exactly one current consent leaf", () => {
+  it("treats participant and representative evidence as one lineage across initial, renewal, and grant", async () => {
+    ex.setUser(fx.schedulerUid);
+    const effectiveFrom = iso(-1);
+    const effectiveUntil = iso(60);
+    const authorityId = ((await ex.execAsService(`
+      select id from public.representative_authorities
+      where organisation_id='${fx.orgId}' and participant_id='${fx.participantId}'
+        and representative_profile_id='${fx.representerUid}'
+      order by created_at asc limit 1
+    `)).rows[0] as { id: string }).id;
+    const participantConsent = (await ex.callRpc("cmd_admin_record_consent", {
+      command_id: "basis-blind-participant-initial",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.participantUid,
+      purpose: "participant basis",
+      scope_categories: ["service_summary"],
+      consent_basis: "participant",
+      representative_authority_id: null,
+      evidence_reference: "participant-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number };
+    expect(participantConsent.version).toBe(1);
+
+    // Changing evidence basis cannot create a parallel current leaf.
+    await expect(ex.callRpc("cmd_admin_record_consent", {
+      command_id: "basis-blind-representative-initial",
+      organisation_id: fx.orgId,
+      participant_id: fx.participantId,
+      recipient_profile_id: fx.externalUid,
+      authorising_profile_id: fx.representerUid,
+      purpose: "representative basis",
+      scope_categories: ["service_summary"],
+      consent_basis: "authorised_representative",
+      representative_authority_id: authorityId,
+      evidence_reference: "representative-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)).rejects.toThrow(/consent_lineage_exists/);
+
+    const renewed = (await ex.callRpc("cmd_admin_renew_consent", {
+      command_id: "basis-blind-renewal",
+      organisation_id: fx.orgId,
+      consent_id: participantConsent.consent_id,
+      expected_current_consent_id: participantConsent.consent_id,
+      purpose: "renewed participant basis",
+      scope_categories: ["service_summary"],
+      evidence_reference: "renewed-evidence",
+      effective_from: effectiveFrom,
+      effective_until: effectiveUntil,
+      payload: {},
+    } as Record<string, unknown>)) as { consent_id: string; version: number };
+    expect(renewed.version).toBe(2);
+
+    const grant = (await ex.callRpc("cmd_admin_create_grant", {
+      command_id: "basis-blind-grant",
+      organisation_id: fx.orgId,
+      consent_id: renewed.consent_id,
+      effective_from: effectiveFrom,
+      effective_until: iso(30),
+      payload: {},
+    } as Record<string, unknown>)) as { grant_id: string };
+    expect(grant.grant_id).toBeTruthy();
+  });
+
   it("supports three or more renewals with deterministic versions and a single unsuperseded current", async () => {
     ex.setUser(fx.schedulerUid);
     const effectiveFrom = iso(-1);
@@ -923,6 +1034,7 @@ describe("ticket 05 DB fixup — predecessor update is conditional on superseded
 
     // Direct SQL: simulate a concurrent renewal that has already
     // advanced the chain by stamping v1.superseded_by = v2.id.
+    await ex.execAsService(`drop index if exists public.participant_consent_current_leaf_uidx`);
     await ex.execAsService(`
       insert into public.participant_consent_evidence (
         organisation_id, participant_id, recipient_profile_id, authorising_profile_id,
@@ -992,6 +1104,7 @@ describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy act
     // a version column. We drop the NOT NULL + unique constraint,
     // insert duplicates with explicit NULL versions, then run the
     // upgrade CTE.
+    await ex.execAsService(`drop index if exists public.participant_consent_current_leaf_uidx`);
     await ex.execAsService(`
       alter table public.participant_consent_evidence
         drop constraint if exists participant_consent_version_unique
@@ -1021,36 +1134,22 @@ describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy act
         ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
          'authorised_representative', 'legacy-dup-1', array['service_summary']::text[], 'legacy-1',
          '${iso(-1)}', '${iso(60)}', now() - interval '3 days', '${fx.schedulerUid}', null, null),
-        ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
-         'authorised_representative', 'legacy-dup-2', array['service_summary']::text[], 'legacy-2',
+        ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.participantUid}',
+         'participant', 'legacy-dup-2', array['service_summary']::text[], 'legacy-2',
          '${iso(-1)}', '${iso(60)}', now() - interval '2 days', '${fx.schedulerUid}', null, null),
         ('${fx.orgId}', '${fx.participantId}', '${fx.externalUid}', '${fx.representerUid}',
          'authorised_representative', 'legacy-dup-3', array['service_summary']::text[], 'legacy-3',
          '${iso(-1)}', '${iso(60)}', now() - interval '1 day', '${fx.schedulerUid}', null, null)
     `);
 
-    // Re-run the upgrade CTE from 0008b (idempotent).
-    await ex.execAsService(`
-      with versioned as (
-        select
-          id,
-          row_number() over (
-            partition by organisation_id, participant_id, recipient_profile_id, consent_basis
-            order by created_at asc, id asc
-          ) as new_version,
-          lead(id) over (
-            partition by organisation_id, participant_id, recipient_profile_id, consent_basis
-            order by created_at asc, id asc
-          ) as new_superseded_by
-        from public.participant_consent_evidence
-        where version is null
-      )
-      update public.participant_consent_evidence p
-        set version       = v.new_version,
-            superseded_by = v.new_superseded_by
-        from versioned v
-        where p.id = v.id
-    `);
+    // Re-run the actual final migration against populated pre-version
+    // duplicate history, proving the production upgrade path itself is
+    // basis-blind and idempotent rather than copying its CTE into a test.
+    const finalMigration = fs.readFileSync(
+      path.resolve(process.cwd(), "supabase/migrations/0008c_admin_final_security_lineage_fixup.sql"),
+      "utf8",
+    );
+    await ex.raw.exec(finalMigration);
 
     const rows = (await ex.execAsService(`
       select id, version, superseded_by, purpose
@@ -1058,7 +1157,6 @@ describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy act
       where organisation_id='${fx.orgId}'
         and participant_id='${fx.participantId}'
         and recipient_profile_id='${fx.externalUid}'
-        and consent_basis='authorised_representative'
         and purpose like 'legacy-dup-%'
       order by version
     `)).rows as Array<{ id: string; version: number; superseded_by: string | null; purpose: string }>;
@@ -1072,15 +1170,6 @@ describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy act
 
     // The (org, participant, recipient, consent_basis) uniqueness
     // constraint now admits these deterministic versions.
-    await ex.execAsService(`
-      alter table public.participant_consent_evidence
-        alter column version set not null
-    `);
-    await ex.execAsService(`
-      alter table public.participant_consent_evidence
-        add constraint participant_consent_version_unique
-        unique (organisation_id, participant_id, recipient_profile_id, version)
-    `);
   });
 });
 
