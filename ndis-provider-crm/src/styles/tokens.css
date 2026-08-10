@@ -20,7 +20,8 @@
   --color-muted: #f4f4f5;
   --color-muted-fg: #52525b;
   --color-border: #e4e4e7;
-  --color-border-strong: #a1a1aa;
+  /* Boundary colour is also used by sticky action regions; keep it >=3:1 on white. */
+  --color-border-strong: #71717a;
 
   --color-primary: #18181b;
   --color-primary-fg: #fafafa;

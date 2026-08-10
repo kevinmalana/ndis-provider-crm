@@ -89,7 +89,20 @@
   background: color-mix(in srgb, var(--color-bg) 96%, transparent);
   border-top: 1px solid var(--color-border-strong);
   box-shadow: 0 -0.5rem 1rem color-mix(in srgb, var(--color-fg) 12%, transparent);
-  scroll-margin-bottom: 6rem;
+  scroll-margin-block-end: var(--sticky-action-space, 6rem);
+}
+
+/* StickyActionLayout owns the scrolling region. It measures the action bar and
+ * reserves that exact amount of scroll space so focused content can clear it. */
+.focus-safe-scroll-region {
+  max-height: 100%;
+  overflow: auto;
+  scroll-padding-block-end: var(--sticky-action-space, 6rem);
+  padding-block-end: var(--sticky-action-space, 6rem);
+}
+
+.focus-safe-scroll-region :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  scroll-margin-block-end: var(--sticky-action-space, 6rem);
 }
 
 .worker-control {

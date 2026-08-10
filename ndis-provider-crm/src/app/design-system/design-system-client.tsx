@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-import { AccessibleStatus, FormError, StickyActionBar } from "@/components/ui/accessibility"
+import { AccessibleStatus, FormError, StickyActionLayout } from "@/components/ui/accessibility"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import {
@@ -64,7 +64,7 @@ export default function DesignSystemClient() {
   }, [])
 
   return (
-    <main data-org="demo" data-theme-validated="true" className="mx-auto max-w-5xl space-y-12 px-6 py-10">
+    <main data-org="demo" className="mx-auto max-w-5xl space-y-12 px-6 py-10">
       <header className="space-y-2">
         <h1 className="text-3xl font-bold">Design system reference</h1>
         <p className="text-muted-foreground">Development-only token and component reference. Values below are resolved with <code>getComputedStyle</code>; tenant overrides are accepted only after server validation.</p>
@@ -79,7 +79,7 @@ export default function DesignSystemClient() {
         <h2 id="components-heading" className="text-xl font-semibold">Installed components</h2>
         <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Buttons and worker control</h3><div className="flex flex-wrap gap-2"><Button className="ordinary-control">Primary</Button><Button variant="outline" className="ordinary-control">Outline</Button><Button variant="secondary" className="ordinary-control">Secondary</Button><Button variant="ghost" className="ordinary-control">Ghost</Button><Button variant="destructive" className="ordinary-control">Destructive</Button><Button className="worker-control">Worker action (48 px)</Button></div></Card>
         <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Card, label, input and form error</h3><div className="max-w-md space-y-2"><Label htmlFor="ds-name">Full name</Label><Input id="ds-name" aria-describedby="ds-name-error" className="ordinary-control" placeholder="Jordan Walker" /><FormError id="ds-name-error">Example error remains visible and is announced.</FormError></div></Card>
-        <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Status and sticky action</h3><AccessibleStatus>Saved locally. Foreground retry remains available even when optional enhancements are unavailable.</AccessibleStatus><StickyActionBar className="-mx-4 px-4 pt-3"><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" className="ordinary-control">Cancel</Button><Button className="worker-control">Save changes</Button></div></StickyActionBar></Card>
+        <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Status and sticky action</h3><AccessibleStatus>Saved locally. Foreground retry remains available even when optional enhancements are unavailable.</AccessibleStatus><StickyActionLayout actionBar={<div className="flex flex-wrap justify-end gap-2"><Button variant="outline" className="ordinary-control">Cancel</Button><Button className="worker-control">Save changes</Button></div>}><p className="min-h-32 text-sm text-muted-foreground">The scrolling region reserves the measured action-bar height. Tab to controls at the bottom to verify focus remains visible.</p></StickyActionLayout></Card>
         <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Dialog and dropdown menu</h3><div className="flex flex-wrap gap-2"><Dialog><DialogTrigger asChild><Button className="ordinary-control">Open dialog</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>Accessible dialog</DialogTitle><DialogDescription>Focus is trapped and restored by the primitive.</DialogDescription></DialogHeader><Button className="worker-control">Confirm</Button></DialogContent></Dialog><DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" className="ordinary-control">Open menu</Button></DropdownMenuTrigger><DropdownMenuContent><DropdownMenuItem>First action</DropdownMenuItem><DropdownMenuItem>Second action</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></Card>
         <Card className="space-y-3 p-4"><h3 className="text-base font-medium">Sheet and Sonner</h3><div className="flex flex-wrap gap-2"><Sheet><SheetTrigger asChild><Button variant="outline" className="ordinary-control">Open sheet</Button></SheetTrigger><SheetContent><SheetHeader><SheetTitle>Accessible sheet</SheetTitle><SheetDescription>Escape and the close button both remain available.</SheetDescription></SheetHeader></SheetContent></Sheet><Button className="ordinary-control" onClick={() => toast.success("Saved", { description: "This notification is supplementary to visible status." })}>Show toast</Button></div></Card>
       </section>

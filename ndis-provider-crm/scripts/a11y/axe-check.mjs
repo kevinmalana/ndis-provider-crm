@@ -7,7 +7,8 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   await page.goto(url, { waitUntil: "networkidle" })
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag22aa"]).analyze()
-  const blocking = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact))
+  // No allowlist is configured: every WCAG violation is an unbaselined release failure.
+  const blocking = results.violations
   console.log(`axe: ${results.passes.length} pass groups, ${results.violations.length} violation groups`)
   if (blocking.length) {
     console.error(JSON.stringify(blocking, null, 2))

@@ -6,9 +6,9 @@ const results = await pa11y(url, {
   includeWarnings: true,
   browserLaunchOptions: { headless: true },
 })
-const errors = results.issues.filter((issue) => issue.type === "Error")
-console.log(`pa11y: ${results.issues.length} issues (${errors.length} errors)`)
-if (errors.length) {
-  console.error(JSON.stringify(errors, null, 2))
+// No warning/error allowlist is configured: every WCAG issue is unbaselined.
+console.log(`pa11y: ${results.issues.length} issues`)
+if (results.issues.length) {
+  console.error(JSON.stringify(results.issues, null, 2))
   process.exitCode = 1
 }

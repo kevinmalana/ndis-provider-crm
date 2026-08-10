@@ -196,7 +196,7 @@ and admin clients consume for fully typed queries.
 - **Icons**: `lucide-react`. Don't ship inline SVGs for first-class icons.
 - **Font**: Inter via `next/font` (variable, weights 400–700). No runtime Google Fonts requests.
 - **Dev reference**: `pnpm dev` → `http://localhost:3000/design-system` (dev-only — production responds with a real 404). Shows resolved values for every token plus a sample of each installed UI component.
-- **Accessibility rails**: ordinary controls use the 24 CSS-px baseline; worker actions use 48 CSS px. `AccessibleStatus`, `FormError`, and `StickyActionBar` provide reusable non-colour/non-audio status, error, and focus-safe sticky patterns. Run `pnpm a11y` with a locally installed Chromium browser for representative axe and Pa11y checks.
+- **Accessibility rails**: ordinary controls use the 24 CSS-px baseline; worker actions use 48 CSS px. `AccessibleStatus`, `FormError`, and `StickyActionLayout`/`StickyActionBar` provide reusable non-colour/non-audio status, error, and measured scroll-space sticky patterns. Tenant branding must pass `resolveValidatedTenantTheme` at a trusted server boundary before the validated CSS hook is emitted. Run `pnpm a11y` with a locally installed Chromium browser for representative axe and Pa11y checks.
 
 ### Adding a new shadcn component
 

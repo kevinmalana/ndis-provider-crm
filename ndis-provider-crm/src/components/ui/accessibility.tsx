@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode } from "react"
+import { useEffect, useRef, type HTMLAttributes, type ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -45,4 +45,39 @@ function StickyActionBar({ className, ...props }: HTMLAttributes<HTMLDivElement>
   return <div className={cn("focus-safe-sticky-action", className)} {...props} />
 }
 
-export { AccessibleStatus, FormError, StickyActionBar }
+type StickyActionLayoutProps = HTMLAttributes<HTMLDivElement> & {
+  actionBar: ReactNode
+}
+
+/**
+ * Scroll-container contract for sticky actions. The ResizeObserver keeps the
+ * scroll padding equal to the rendered bar, including safe-area insets and
+ * responsive wrapping, so keyboard focus cannot be hidden underneath it.
+ */
+function StickyActionLayout({ actionBar, className, children, ...props }: StickyActionLayoutProps) {
+  const regionRef = useRef<HTMLDivElement>(null)
+  const actionRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const region = regionRef.current
+    const action = actionRef.current
+    if (!region || !action) return
+
+    const updateSpace = () => region.style.setProperty("--sticky-action-space", `${action.offsetHeight}px`)
+    updateSpace()
+    const observer = new ResizeObserver(updateSpace)
+    observer.observe(action)
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <div ref={regionRef} className={cn("focus-safe-scroll-region", className)} {...props}>
+      <div>{children}</div>
+      <div ref={actionRef}>
+        <StickyActionBar>{actionBar}</StickyActionBar>
+      </div>
+    </div>
+  )
+}
+
+export { AccessibleStatus, FormError, StickyActionBar, StickyActionLayout }
