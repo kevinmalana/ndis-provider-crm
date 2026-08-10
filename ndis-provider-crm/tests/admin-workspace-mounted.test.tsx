@@ -119,6 +119,11 @@ beforeEach(() => {
   routerMock.refresh.mockReset();
   clipboardMock.mockReset();
   clipboardMock.mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: clipboardMock },
+    configurable: true,
+    writable: true,
+  });
 });
 
 afterEach(() => {
@@ -180,18 +185,14 @@ async function clickTab(name: "Roster" | "Access" | "Audit" | "Overview" | "Part
 }
 
 describe("mounted AdminWorkspace — normal success preserves form and triggers refresh", () => {
-  it("submits a shift with the current form values, then a transport-uncertain retry reuses the same arguments and the same command ID", async () => {
-    mockRpcSequence([
-      { status: "accepted", receipt_id: "r-1", shift_id: "shift-1", warnings: [] },
-      // Retry: transport uncertain → server returns duplicate_returned
-      // because the same command ID + same arguments are submitted.
-      {
-        status: "duplicate_returned",
-        duplicate: true,
-        receipt_id: "r-1",
-        outcome: { shift_id: "shift-1", warnings: [] },
-      },
-    ]);
+  it("retries a rejected/uncertain shift with the exact same arguments and command ID, then refreshes on duplicate", async () => {
+    rpcMock.mockRejectedValueOnce(new Error("response lost after commit"));
+    mockRpcSequence([{
+      status: "duplicate_returned",
+      duplicate: true,
+      receipt_id: "r-1",
+      outcome: { shift_id: "shift-1", warnings: [] },
+    }]);
     render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
     await clickTab("Roster");
     await fillCreateShift();
@@ -207,7 +208,7 @@ describe("mounted AdminWorkspace — normal success preserves form and triggers 
     expect(firstArgs.p_participant_id).toBe("p-1");
     expect(firstArgs.p_worker_membership).toBe("m-worker-1");
 
-    await waitFor(() => expect(routerMock.refresh).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText(/Could not save: response lost after commit/i)).toBeInTheDocument());
 
     // Submit again without changing anything — same form values,
     // same command ID. The server replies duplicate_returned and the
@@ -223,7 +224,7 @@ describe("mounted AdminWorkspace — normal success preserves form and triggers 
     expect(secondArgs.p_scheduled_start).toBe(firstArgs.p_scheduled_start);
     expect(secondArgs.p_scheduled_end).toBe(firstArgs.p_scheduled_end);
 
-    await waitFor(() => expect(routerMock.refresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(routerMock.refresh).toHaveBeenCalledTimes(1));
   });
 });
 
@@ -332,6 +333,53 @@ describe("mounted AdminWorkspace — invitation duplicate retry preserves the ac
     await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
     expect(clipboardMock).toHaveBeenCalledTimes(2);
     expect(clipboardMock.mock.calls[1][0]).toContain("/invite/tok-1");
+  });
+
+  it("renders a selectable URL when the Clipboard API is missing", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true, writable: true });
+    mockRpcSequence([{ status: "accepted", receipt_id: "r-invite-missing", invitation_id: "inv-missing", token: "tok-missing", role: "worker", email: "missing@y.test" }]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Access");
+    await act(async () => fireEvent.change(screen.getByLabelText("Email"), { target: { value: "missing@y.test" } }));
+    await clickByText(/^Issue invitation$/);
+    await waitFor(() => expect((screen.getByLabelText("Selectable invitation URL") as HTMLInputElement).value).toContain("/invite/tok-missing"));
+  });
+
+  it("renders a selectable URL when clipboard permission is rejected", async () => {
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true, writable: true });
+    mockRpcSequence([{ status: "accepted", receipt_id: "r-invite-denied", invitation_id: "inv-denied", token: "tok-denied", role: "worker", email: "denied@y.test" }]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Access");
+    await act(async () => fireEvent.change(screen.getByLabelText("Email"), { target: { value: "denied@y.test" } }));
+    await clickByText(/^Issue invitation$/);
+    await waitFor(() => expect((screen.getByLabelText("Selectable invitation URL") as HTMLInputElement).value).toContain("/invite/tok-denied"));
+  });
+});
+
+describe("mounted AdminWorkspace — duplicate warning is terminal and acknowledgement rotates", () => {
+  it("retries reject→duplicate, acknowledges the duplicate warning, then submits a fresh intent", async () => {
+    rpcMock.mockRejectedValueOnce(new Error("response lost"));
+    mockRpcSequence([
+      { status: "duplicate_returned", duplicate: true, receipt_id: "r-dup", outcome: { shift_id: "shift-dup", warnings: ["worker_overlap"] } },
+      { status: "accepted", receipt_id: "r-new", shift_id: "shift-new", warnings: [] },
+    ]);
+    render(<AdminWorkspace organisation={organisation} initialData={initialData} />);
+    await clickTab("Roster");
+    await fillCreateShift();
+    await submitShiftForm();
+    const firstId = ((rpcMock.mock.calls[0] as unknown[])[1] as Record<string, unknown>).p_command_id;
+    await waitFor(() => expect(screen.getByText(/Could not save: response lost/i)).toBeInTheDocument());
+    await submitShiftForm();
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText(/Roster warnings require review/i)).toBeInTheDocument());
+    const retryId = ((rpcMock.mock.calls[1] as unknown[])[1] as Record<string, unknown>).p_command_id;
+    expect(retryId).toBe(firstId);
+    await act(async () => fireEvent.click(screen.getByRole("checkbox")));
+    await waitFor(() => expect((screen.getByRole("button", { name: /^Create shift$/ }) as HTMLButtonElement).disabled).toBe(false));
+    await submitShiftForm();
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(3));
+    const newId = ((rpcMock.mock.calls[2] as unknown[])[1] as Record<string, unknown>).p_command_id;
+    expect(newId).not.toBe(firstId);
   });
 });
 
@@ -457,5 +505,59 @@ describe("mounted AdminWorkspace — consent record vs renew routes by current-l
     const renewArgs = renewCall[1] as Record<string, unknown>;
     expect(renewArgs.p_consent_id).toBe("cons-current");
     expect(renewArgs.p_expected_current_consent_id).toBe("cons-current");
+  });
+
+  it("records representative consent with the selected current authority, then creates a grant from that consent", async () => {
+    const authority = {
+      id: "authority-1",
+      participant_id: "p-1",
+      representative_profile_id: "rep-1",
+      authority_type: "plan_nominee",
+      scope_categories: ["service_summary"],
+      evidence_reference: "authority-evidence",
+      effective_from: "2026-08-01T00:00:00Z",
+      effective_until: "2026-12-01T00:00:00Z",
+      status: "active",
+    };
+    const withAuthority = { ...initialData, authorities: [authority] };
+    rpcMock.mockResolvedValueOnce({ data: { status: "accepted", receipt_id: "r-consent", consent_id: "cons-rep", version: 1 }, error: null });
+    const rendered = render(<AdminWorkspace organisation={organisation} initialData={withAuthority} />);
+    await clickTab("Access");
+    await act(async () => {
+      const participants = screen.getAllByLabelText("Participant");
+      fireEvent.change(participants[0], { target: { value: "p-1" } });
+      const recipients = screen.getAllByLabelText("External recipient");
+      fireEvent.change(recipients[0], { target: { value: "ext-1" } });
+      fireEvent.change(screen.getByLabelText("Consent basis"), { target: { value: "authorised_representative" } });
+      fireEvent.change(screen.getByLabelText("Representative authority"), { target: { value: "authority-1" } });
+      fireEvent.change(screen.getByLabelText("Purpose"), { target: { value: "coordinate" } });
+      fireEvent.change(screen.getAllByLabelText("Scope categories")[0], { target: { value: "service_summary" } });
+      fireEvent.change(screen.getAllByLabelText("Evidence reference")[0], { target: { value: "consent-rep-evidence" } });
+    });
+    await clickByRole("button", /^Record consent evidence$/);
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(1));
+    const consentArgs = rpcMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(consentArgs.p_consent_basis).toBe("authorised_representative");
+    expect(consentArgs.p_representative_authority_id).toBe("authority-1");
+    expect(consentArgs.p_authorising_profile_id).toBe("rep-1");
+
+    const withConsent = {
+      ...withAuthority,
+      consents: [{
+        id: "cons-rep", participant_id: "p-1", recipient_profile_id: "ext-1",
+        authorising_profile_id: "rep-1", consent_basis: "authorised_representative",
+        purpose: "coordinate", scope_categories: ["service_summary"], evidence_reference: "consent-rep-evidence",
+        effective_from: "2026-08-01T00:00:00Z", effective_until: "2026-12-01T00:00:00Z",
+        status: "active", representative_authority_id: "authority-1", version: 1, superseded_by: null,
+      }],
+    };
+    rpcMock.mockResolvedValueOnce({ data: { status: "accepted", receipt_id: "r-grant", grant_id: "grant-rep" }, error: null });
+    rendered.rerender(<AdminWorkspace organisation={organisation} initialData={withConsent} />);
+    const grantSelect = screen.getByLabelText("Consent evidence") as HTMLSelectElement;
+    await act(async () => fireEvent.change(grantSelect, { target: { value: "cons-rep" } }));
+    await clickByRole("button", /^Create view-only grant$/);
+    await waitFor(() => expect(rpcMock).toHaveBeenCalledTimes(2));
+    const grantArgs = rpcMock.mock.calls[1][1] as Record<string, unknown>;
+    expect(grantArgs.p_consent_id).toBe("cons-rep");
   });
 });

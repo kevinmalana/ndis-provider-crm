@@ -112,6 +112,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
   const [lastFingerprint, setLastFingerprint] = useState<Record<FormKey, PayloadFingerprint | null>>(
     () => Object.fromEntries(Object.values(FORM_KEYS).map((k) => [k, null])) as Record<FormKey, PayloadFingerprint | null>,
   );
+  const [inviteFallbackUrl, setInviteFallbackUrl] = useState<string | null>(null);
 
   const workers = data.identities.filter((m) => m.role === "worker");
   const identityLabels = useMemo(
@@ -170,17 +171,29 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
 
     if (formKey === FORM_KEYS.invite && result.token) {
       const url = `${window.location.origin}/invite/${result.token}`;
-      // Best-effort copy. Fall back to a selectable message when the
-      // browser denies clipboard access.
-      navigator.clipboard
-        ?.writeText?.(url)
-        .then(() => setFormMessage(formKey, "Invitation created. The single-use link was copied; share it through the provider’s approved channel."))
-        .catch(() =>
-          setFormMessage(
-            formKey,
-            `Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`,
-          ),
-        );
+      setInviteFallbackUrl(url);
+      const fallback = `Invitation created. Copy this single-use link through the provider’s approved channel: ${url}`;
+      // Always render the selectable URL first. Clipboard is an optional
+      // enhancement: missing APIs, non-Promise implementations, and
+      // permission-rejected writes must never make a committed invite
+      // unrecoverable.
+      setFormMessage(formKey, fallback);
+      const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+      const writeText = clipboard?.writeText;
+      if (typeof writeText !== "function") return;
+      try {
+        const writeResult = writeText.call(clipboard, url);
+        if (writeResult && typeof (writeResult as PromiseLike<void>).then === "function") {
+          Promise.resolve(writeResult).then(
+            () => setFormMessage(formKey, "Invitation created. The single-use link was copied; the selectable URL remains available below."),
+            () => setFormMessage(formKey, fallback),
+          );
+        } else {
+          setFormMessage(formKey, "Invitation created. The single-use link was copied; the selectable URL remains available below.");
+        }
+      } catch {
+        setFormMessage(formKey, fallback);
+      }
     }
   }
 
@@ -207,6 +220,9 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     const commandId = shouldReuseCommandId(currentRecord, fingerprint, lastFingerprintForForm)
       ? currentCommandId(formKey)
       : renewCommandId(formKey);
+    // Capture the exact logical arguments before the RPC starts so a
+    // rejection/throw can retry with the same command ID and payload.
+    setLastFingerprint((prev) => ({ ...prev, [formKey]: fingerprint }));
     try {
       const { data: result, error } = await supabase.rpc(name, { ...args, p_command_id: commandId });
       if (error) {
@@ -354,6 +370,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
           formError={formError}
           privacyFallback={PRIVACY_SAFE_RECIPIENT_FALLBACK}
           labelLookup={(profileId) => labelFor(identityLabels, profileId)}
+          inviteFallbackUrl={inviteFallbackUrl}
         />
       ) : null}
       {tab === "audit" ? <Audit data={data} /> : null}
@@ -715,6 +732,7 @@ function Access({
   formError,
   privacyFallback,
   labelLookup,
+  inviteFallbackUrl,
 }: {
   data: Data;
   organisationId: string;
@@ -724,6 +742,7 @@ function Access({
   formError: (formKey: FormKey) => string | null;
   privacyFallback: string;
   labelLookup: (profileId: string) => { hasLabel: true; label: string; role: string } | { hasLabel: false; label: string; role: null };
+  inviteFallbackUrl: string | null;
 }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("worker");
@@ -735,6 +754,8 @@ function Access({
   const [consentParticipant, setConsentParticipant] = useState("");
   const [consentRecipient, setConsentRecipient] = useState("");
   const [consentAuthoriser, setConsentAuthoriser] = useState("");
+  const [consentBasis, setConsentBasis] = useState<"participant" | "authorised_representative">("participant");
+  const [consentAuthorityId, setConsentAuthorityId] = useState("");
   const [consentPurpose, setConsentPurpose] = useState("");
   const [consentScope, setConsentScope] = useState("service_summary");
   const [consentEvidence, setConsentEvidence] = useState("");
@@ -766,6 +787,9 @@ function Access({
   const recordPair = consentParticipant && consentRecipient
     ? currentConsentForPair(consentParticipant, consentRecipient)
     : null;
+  const participantAuthorities = consentParticipant
+    ? data.authorities.filter((authority) => authority.participant_id === consentParticipant && authority.status === "active")
+    : [];
   const renewPair = renewParticipant && renewRecipient
     ? currentConsentForPair(renewParticipant, renewRecipient)
     : null;
@@ -800,6 +824,12 @@ function Access({
             <Field label="Expires"><Input required type="datetime-local" value={inviteExpiry} onChange={(e) => setInviteExpiry(e.target.value)} /></Field>
             <Button type="submit" disabled={isPending(FORM_KEYS.invite)} aria-busy={isPending(FORM_KEYS.invite)}>Issue invitation</Button>
             {formError(FORM_KEYS.invite) ? <p role="status" className="text-xs text-info-foreground">{formError(FORM_KEYS.invite)}</p> : null}
+            {inviteFallbackUrl ? (
+              <div className="space-y-2" role="status">
+                <Label htmlFor="invite-fallback-url">Selectable invitation URL</Label>
+                <Input id="invite-fallback-url" readOnly value={inviteFallbackUrl} aria-label="Selectable invitation URL" />
+              </div>
+            ) : null}
           </form>
         </CardContent>
       </Card>
@@ -807,7 +837,7 @@ function Access({
       <Card>
         <CardHeader>
           <CardTitle>Record consent evidence</CardTitle>
-          <CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window. If a current consent already exists for this (participant, recipient, basis) pair, use the renewal form instead.</CardDescription>
+          <CardDescription>Provider-recorded evidence is separate from self-access and authority. It names the recipient, purpose, categories, basis, and time window. Participant and authorised-representative evidence share one current lineage; renew an existing pair instead of creating a parallel record.</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -823,8 +853,8 @@ function Access({
                 p_authorising_profile_id: consentAuthoriser,
                 p_purpose: consentPurpose,
                 p_scope_categories: consentScope.split(",").map((s) => s.trim()).filter(Boolean),
-                p_consent_basis: "participant",
-                p_representative_authority_id: null,
+                p_consent_basis: consentBasis,
+                p_representative_authority_id: consentBasis === "authorised_representative" ? consentAuthorityId : null,
                 p_evidence_reference: consentEvidence,
                 p_effective_from: from.toISOString(),
                 p_effective_until: until.toISOString(),
@@ -847,15 +877,49 @@ function Access({
                 })}
               </select>
             </Field>
-            <Field label="Participant authoriser">
-              <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
-                <option value="">Choose participant account</option>
-                {data.identities.filter((i) => i.role === "participant").map((i) => {
-                  const label = labelLookup(String(i.profile_id));
-                  return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
-                })}
+            <Field label="Consent basis">
+              <select required value={consentBasis} onChange={(e) => {
+                const next = e.target.value as "participant" | "authorised_representative";
+                setConsentBasis(next);
+                setConsentAuthoriser("");
+                setConsentAuthorityId("");
+              }} className="h-9 w-full rounded-md border bg-background px-2">
+                <option value="participant">Participant self-evidence</option>
+                <option value="authorised_representative">Authorised-representative evidence</option>
               </select>
             </Field>
+            {consentBasis === "participant" ? (
+              <Field label="Participant authoriser">
+                <select required value={consentAuthoriser} onChange={(e) => setConsentAuthoriser(e.target.value)} className="h-9 w-full rounded-md border bg-background px-2">
+                  <option value="">Choose participant account</option>
+                  {data.identities.filter((i) => i.role === "participant").map((i) => {
+                    const label = labelLookup(String(i.profile_id));
+                    return <option key={String(i.profile_id)} value={String(i.profile_id)}>{label.label}</option>;
+                  })}
+                </select>
+              </Field>
+            ) : (
+              <>
+                <Field label="Representative authority">
+                  <select required value={consentAuthorityId} onChange={(e) => {
+                    const authorityId = e.target.value;
+                    setConsentAuthorityId(authorityId);
+                    const selected = participantAuthorities.find((authority) => authority.id === authorityId);
+                    setConsentAuthoriser(selected ? String(selected.representative_profile_id) : "");
+                  }} className="h-9 w-full rounded-md border bg-background px-2">
+                    <option value="">Choose current authority for this participant</option>
+                    {participantAuthorities.map((authority) => {
+                      const label = labelLookup(String(authority.representative_profile_id));
+                      const scope = Array.isArray(authority.scope_categories) ? (authority.scope_categories as string[]).join(", ") : "scoped authority";
+                      return <option key={String(authority.id)} value={String(authority.id)}>{label.label} · {scope}</option>;
+                    })}
+                  </select>
+                </Field>
+                <Field label="Authorised representative">
+                  <Input readOnly required value={consentAuthoriser ? labelLookup(consentAuthoriser).label : ""} placeholder="Choose an authority above" />
+                </Field>
+              </>
+            )}
             <Field label="Purpose"><Input required value={consentPurpose} onChange={(e) => setConsentPurpose(e.target.value)} placeholder="e.g. coordination with school" /></Field>
             <Field label="Scope categories"><Input required value={consentScope} onChange={(e) => setConsentScope(e.target.value)} placeholder="service_summary,upcoming_visits" /></Field>
             <Field label="Evidence reference"><Input required value={consentEvidence} onChange={(e) => setConsentEvidence(e.target.value)} placeholder="provider-recorded consent identifier" /></Field>

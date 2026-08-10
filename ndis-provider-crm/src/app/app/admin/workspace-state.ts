@@ -93,7 +93,7 @@ export function shouldRotateAfterAck(
   rec: CommandRecord,
   acks: WarningAcknowledgement[],
 ): boolean {
-  if (rec.status !== "succeeded") return false;
+  if (rec.status !== "succeeded" && rec.status !== "duplicate") return false;
   if (rec.warnings.length === 0) return false;
   if (!rec.resultKey) return false;
   return allWarningsAcknowledged(acks, rec.resultKey, rec.warnings);
@@ -361,9 +361,10 @@ export function payloadFingerprint(args: Record<string, unknown>): PayloadFinger
  * submission's fingerprint — a transport-uncertain retry (same
  * payload, status pending/errored) returns the original outcome
  * through duplicate_returned; a re-click with the same form values
- * after a terminal success also reuses the command ID so the user
- * gets the same result rather than a duplicate row. A changed
- * payload fingerprint mints a fresh command ID.
+ * while the prior submission is still pending/errored. Once the
+ * server has returned a terminal accepted or duplicate result, the
+ * next intentional submit gets a fresh command ID. A changed payload
+ * fingerprint also mints a fresh command ID.
  */
 export function shouldReuseCommandId(
   rec: CommandRecord,
@@ -372,10 +373,10 @@ export function shouldReuseCommandId(
 ): boolean {
   if (lastFingerprint === null) return false;
   if (lastFingerprint !== fingerprint) return false;
-  // Same payload as the previous submission: reuse, regardless of
-  // whether the prior result was transport-uncertain or already
-  // terminal.
-  return rec.status !== "idle";
+  // Same payload is a retry only while the previous attempt is still
+  // transport-uncertain. Terminal accepted/duplicate outcomes are a
+  // completed intent; the next submit must rotate the command ID.
+  return rec.status === "pending" || rec.status === "errored";
 }
 
 export type CommandLifecycle = {
