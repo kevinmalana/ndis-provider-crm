@@ -112,6 +112,9 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
   const [lastFingerprint, setLastFingerprint] = useState<Record<FormKey, PayloadFingerprint | null>>(
     () => Object.fromEntries(Object.values(FORM_KEYS).map((k) => [k, null])) as Record<FormKey, PayloadFingerprint | null>,
   );
+  const [lastArgs, setLastArgs] = useState<Record<FormKey, Record<string, unknown> | null>>(
+    () => Object.fromEntries(Object.values(FORM_KEYS).map((k) => [k, null])) as Record<FormKey, Record<string, unknown> | null>,
+  );
   const [inviteFallbackUrl, setInviteFallbackUrl] = useState<string | null>(null);
 
   const workers = data.identities.filter((m) => m.role === "worker");
@@ -217,14 +220,17 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
     // A retry of the same logical command (same payload fingerprint
     // while still transport-uncertain) reuses the existing command
     // ID; a changed payload forces a fresh command ID.
-    const commandId = shouldReuseCommandId(currentRecord, fingerprint, lastFingerprintForForm)
+    const reuseCommand = shouldReuseCommandId(currentRecord, fingerprint, lastFingerprintForForm);
+    const retryArgs = reuseCommand && lastArgs[formKey] ? lastArgs[formKey] : args;
+    const commandId = reuseCommand
       ? currentCommandId(formKey)
       : renewCommandId(formKey);
     // Capture the exact logical arguments before the RPC starts so a
     // rejection/throw can retry with the same command ID and payload.
     setLastFingerprint((prev) => ({ ...prev, [formKey]: fingerprint }));
+    setLastArgs((prev) => ({ ...prev, [formKey]: args }));
     try {
-      const { data: result, error } = await supabase.rpc(name, { ...args, p_command_id: commandId });
+      const { data: result, error } = await supabase.rpc(name, { ...retryArgs, p_command_id: commandId });
       if (error) {
         setFormMessage(formKey, `Could not save: ${error.message.replace(/^.*?: /, "")}`);
         transitionRecord(formKey, failCommand);
@@ -242,7 +248,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
             ? "This command was already applied; the original shift result with warnings is shown."
             : "Shift created, but review the roster warnings before treating it as confirmed.",
         );
-        applyResult(formKey, args, normalized);
+        applyResult(formKey, retryArgs, normalized);
         void router.refresh();
         return true;
       }
@@ -252,7 +258,7 @@ export function AdminWorkspace({ organisation, initialData }: { organisation: Or
       } else {
         setFormMessage(formKey, "Saved and added to the audit timeline.");
       }
-      applyResult(formKey, args, normalized);
+      applyResult(formKey, retryArgs, normalized);
       void router.refresh();
       return true;
     } catch (error) {
