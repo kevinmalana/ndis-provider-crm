@@ -19,6 +19,13 @@ describe("magic-link authentication contract", () => {
     );
   });
 
+  it("accepts server-generated hashed magic links without exposing tokens", () => {
+    const callback = read("src/app/auth/callback/route.ts");
+    expect(callback).toContain("supabase.auth.verifyOtp");
+    expect(callback).toContain("token_hash: tokenHash as string");
+    expect(callback).toContain('tokenType === "magiclink"');
+  });
+
   it("accepts invitations only after the callback establishes a session", () => {
     const confirm = read("src/app/invite/[token]/confirm/route.ts");
     const callback = read("src/app/auth/callback/route.ts");
