@@ -19,8 +19,8 @@ const MIGRATION_NAMES = [
   "0006_access_matrix_rls.sql",
   "0007_synthetic_seed_rpc.sql",
   "0008_admin_workspace_rpcs.sql",
-  "0008b_admin_repeat_review_db_fixup.sql",
-  "0008c_admin_final_security_lineage_fixup.sql",
+  "20260811000001_admin_repeat_review_db_fixup.sql",
+  "20260811000002_admin_final_security_lineage_fixup.sql",
   "0009_provider_readiness_service_evidence.sql",
 ];
 

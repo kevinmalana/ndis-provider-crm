@@ -1,6 +1,6 @@
 /**
  * Adversarial regression tests for the Ticket 05 repeat-review DB/security
- * fixup (0008b_admin_repeat_review_db_fixup.sql). Each finding maps to
+ * fixup (20260811000001_admin_repeat_review_db_fixup.sql). Each finding maps to
  * at least one test that reproduces the pre-fixup behaviour, exercises
  * the fix, and confirms the invariant going forward.
  *
@@ -1156,7 +1156,7 @@ describe("ticket 05 DB fixup — pre-version populated upgrade chains legacy act
     // duplicate history, proving the production upgrade path itself is
     // basis-blind and idempotent rather than copying its CTE into a test.
     const finalMigration = fs.readFileSync(
-      path.resolve(process.cwd(), "supabase/migrations/0008c_admin_final_security_lineage_fixup.sql"),
+      path.resolve(process.cwd(), "supabase/migrations/20260811000002_admin_final_security_lineage_fixup.sql"),
       "utf8",
     );
     await ex.raw.exec(finalMigration);

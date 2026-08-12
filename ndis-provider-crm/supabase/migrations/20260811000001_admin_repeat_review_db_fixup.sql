@@ -1,4 +1,4 @@
--- 0008b_admin_repeat_review_db_fixup.sql
+-- 20260811000001_admin_repeat_review_db_fixup.sql
 --
 -- Repeat-review DB/security fixup for Ticket 05. Closes the cold-review
 -- blockers raised at HEAD b30bbfa without consuming the 0009 slot that

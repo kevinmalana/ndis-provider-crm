@@ -16,8 +16,8 @@ describe("Ticket 05b provider-readiness boundary", () => {
     expect(rows.rows.some((row) => (row as { proname: string }).proname === "cmd_admin_create_service_ready_shift")).toBe(true);
   });
 
-  it("proves the migration boundary: old callable through 0008c, absent after 0009", async () => {
-    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+  it("proves the migration boundary: old callable through the final admin fixup, absent after 0009", async () => {
+    const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
     const before = await legacy.execAsService(`select pg_get_function_identity_arguments(oid) as args from pg_proc where pronamespace='public'::regnamespace and proname='cmd_admin_create_shift'`);
     expect(before.rows).toHaveLength(1);
     expect((before.rows[0] as { args: string }).args.replace(/\s+/g, " ")).toBe("p_command_id text, p_organisation_id uuid, p_participant_id uuid, p_worker_membership uuid, p_scheduled_start timestamp with time zone, p_scheduled_end timestamp with time zone, p_reason text, p_payload jsonb");
@@ -27,7 +27,7 @@ describe("Ticket 05b provider-readiness boundary", () => {
   });
 
   it("rolls back the whole migration when a late statement fails", async () => {
-    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+    const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
     try {
       const migration = fs.readFileSync(new URL("../../supabase/migrations/0009_provider_readiness_service_evidence.sql", import.meta.url), "utf8");
       const forcedFailure = migration.replace(/\ncommit;\s*$/, "\nselect 1 / 0;\ncommit;");
@@ -55,7 +55,7 @@ describe("Ticket 05b provider-readiness boundary", () => {
   });
 
   it("marks context-free history as legacy and prevents action", async () => {
-    const legacy = await bootTestDb({ through: "0008c_admin_final_security_lineage_fixup.sql" });
+    const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
     const org = "99999999-9999-4999-8999-999999999901";
     const scheduler = "99999999-9999-4999-8999-999999999902";
     const workerA = "99999999-9999-4999-8999-999999999903";

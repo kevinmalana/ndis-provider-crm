@@ -1,4 +1,4 @@
--- 0008c_admin_final_security_lineage_fixup.sql
+-- 20260811000002_admin_final_security_lineage_fixup.sql
 --
 -- Final narrow correction for Ticket 05: invite receipt outcomes remain
 -- actor-private, and consent evidence uses one basis-blind lineage per
