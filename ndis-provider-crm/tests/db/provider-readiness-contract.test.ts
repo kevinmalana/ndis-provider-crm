@@ -16,7 +16,7 @@ describe("Ticket 05b provider-readiness boundary", () => {
     expect(rows.rows.some((row) => (row as { proname: string }).proname === "cmd_admin_create_service_ready_shift")).toBe(true);
   });
 
-  it("proves the migration boundary: old callable through the final admin fixup, absent after 0009", async () => {
+  it("proves the ordering repair: the later admin fixup reintroduced the old callable and the final schema removes it", async () => {
     const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
     const before = await legacy.execAsService(`select pg_get_function_identity_arguments(oid) as args from pg_proc where pronamespace='public'::regnamespace and proname='cmd_admin_create_shift'`);
     expect(before.rows).toHaveLength(1);
@@ -26,8 +26,24 @@ describe("Ticket 05b provider-readiness boundary", () => {
     expect(after.rows[0]).toMatchObject({ c: 0 });
   });
 
+  it("keeps provider-readiness command types accepted after every migration", async () => {
+    ex.setUser(fx.adminUid);
+    await expect(ex.callRpc("cmd_admin_create_provider_scope_version", {
+      command_id: "scope-after-ordering-repair",
+      organisation_id: fx.orgId,
+      registration_state: "registered",
+      registration_group: "synthetic-group",
+      class_of_support: "individual",
+      jurisdictions: ["NSW"],
+      effective_from: "2026-08-07T00:00:00Z",
+      effective_until: "2027-08-07T00:00:00Z",
+      reviewed_by: fx.adminUid,
+      payload: { source: "ordering-repair-test" },
+    })).resolves.toMatchObject({ status: "accepted" });
+  });
+
   it("rolls back the whole migration when a late statement fails", async () => {
-    const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
+    const legacy = await bootTestDb({ through: "0008_admin_workspace_rpcs.sql" });
     try {
       const migration = fs.readFileSync(new URL("../../supabase/migrations/0009_provider_readiness_service_evidence.sql", import.meta.url), "utf8");
       const forcedFailure = migration.replace(/\ncommit;\s*$/, "\nselect 1 / 0;\ncommit;");
@@ -55,7 +71,7 @@ describe("Ticket 05b provider-readiness boundary", () => {
   });
 
   it("marks context-free history as legacy and prevents action", async () => {
-    const legacy = await bootTestDb({ through: "20260811000002_admin_final_security_lineage_fixup.sql" });
+    const legacy = await bootTestDb({ through: "0008_admin_workspace_rpcs.sql" });
     const org = "99999999-9999-4999-8999-999999999901";
     const scheduler = "99999999-9999-4999-8999-999999999902";
     const workerA = "99999999-9999-4999-8999-999999999903";

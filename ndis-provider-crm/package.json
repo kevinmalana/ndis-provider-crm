@@ -15,7 +15,8 @@
     "db:test": "vitest run",
     "db:types": "supabase gen types typescript --linked > src/lib/supabase/types.gen.ts",
     "bootstrap": "node --env-file=.env.local --import tsx scripts/bootstrap-founding-tenant.ts",
-    "seed:synthetic": "node --env-file=.env.local --import tsx scripts/seed-synthetic.ts"
+    "seed:synthetic": "node --env-file=.env.local --import tsx scripts/seed-synthetic.ts",
+    "validate:synthetic-admin": "node --env-file=.env.local --import tsx scripts/validate-synthetic-admin-journey.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",
