@@ -31,6 +31,7 @@ import {
   type IdentityRow,
   type WarningAcknowledgement,
 } from "@/app/app/admin/workspace-state";
+import { selectCurrentHandoffRoutes } from "@/lib/handoff-routes";
 
 const isoFuture = (offsetDays: number): string =>
   new Date(Date.now() + offsetDays * 86400000).toISOString();
@@ -256,6 +257,44 @@ describe("workspace state — command ID rotates only after ack / new intent", (
     rec = beginCommand(rec);
     rec = completeCommand(rec, { status: "succeeded", resultKey: "shift-1", warnings: [] });
     expect(shouldRotateAfterAck(rec, [])).toBe(false);
+  });
+});
+
+describe("handoff route current-window selection", () => {
+  it("treats only currently effective active route versions as Current", () => {
+    const now = new Date("2026-08-12T12:00:00Z");
+    const routes = selectCurrentHandoffRoutes(
+      [
+        {
+          route_type: "emergency",
+          status: "active",
+          effective_from: "2026-08-12T08:00:00Z",
+          effective_until: null,
+          created_at: "2026-08-12T08:00:00Z",
+        },
+        {
+          route_type: "emergency",
+          status: "active",
+          effective_from: "2026-08-13T08:00:00Z",
+          effective_until: null,
+          created_at: "2026-08-12T09:00:00Z",
+        },
+        {
+          route_type: "incident",
+          status: "active",
+          effective_from: "2026-08-10T08:00:00Z",
+          effective_until: "2026-08-12T11:59:59Z",
+          created_at: "2026-08-10T08:00:00Z",
+        },
+      ],
+      now,
+    );
+
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({
+      route_type: "emergency",
+      effective_from: "2026-08-12T08:00:00Z",
+    });
   });
 });
 

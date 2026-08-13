@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { selectCurrentHandoffRoutes } from "@/lib/handoff-routes";
 
 import {
   PRIVACY_SAFE_RECIPIENT_FALLBACK,
@@ -68,6 +69,8 @@ type Data = {
   maskedIdentifiers?: Array<Record<string, unknown>>;
   snapshots?: Array<Record<string, unknown>>;
   ackLedger?: Array<Record<string, unknown>>;
+  handoffRoutes?: Array<Record<string, unknown>>;
+  handoffReceipts?: Array<Record<string, unknown>>;
 };
 
 const isoTomorrow = () => new Date(Date.now() + 86400000).toISOString().slice(0, 16);
@@ -100,6 +103,7 @@ const FORM_KEYS = {
   contextState: "context-state",
   readinessShift: "readiness-shift",
   acknowledgement: "acknowledgement",
+  handoffRoute: "handoff-route",
 } as const;
 
 type FormKey = typeof FORM_KEYS[keyof typeof FORM_KEYS];
@@ -869,6 +873,14 @@ function Readiness({
   const [ackReason, setAckReason] = useState("");
   const [ackMethod, setAckMethod] = useState("provider_recorded_external_evidence");
   const [ackOccurredAt, setAckOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
+  const [handoffRouteType, setHandoffRouteType] = useState("emergency");
+  const [handoffGuidance, setHandoffGuidance] = useState("Call the provider emergency line after immediate danger is addressed.");
+  const [handoffOwnerRole, setHandoffOwnerRole] = useState("On-call manager");
+  const [handoffPrimaryLabel, setHandoffPrimaryLabel] = useState("Call emergency coordinator");
+  const [handoffPrimaryUri, setHandoffPrimaryUri] = useState("tel:+61255501000");
+  const [handoffFallbackPhone, setHandoffFallbackPhone] = useState("02 5550 1099");
+  const [handoffEffectiveFrom, setHandoffEffectiveFrom] = useState(() => new Date().toISOString().slice(0, 16));
+  const [handoffEffectiveUntil, setHandoffEffectiveUntil] = useState("");
   const [readinessResult, setReadinessResult] = useState<Record<string, unknown> | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
   const [readinessPending, setReadinessPending] = useState(false);
@@ -893,6 +905,9 @@ function Readiness({
   const selectedSnapshot = data.snapshots?.find((snapshot) => String(snapshot.shift_id) === shift);
   const selectedSnapshotCatalogue = data.catalogues?.find((version) => String(version.id) === String(selectedSnapshot?.catalogue_version_id));
   const selectedLedger = (data.ackLedger ?? []).filter((event) => String(event.shift_id) === shift);
+  const selectedHandoffReceipts = (data.handoffReceipts ?? []).filter((event) => String(event.shift_id) === shift);
+  const currentHandoffRoutes = selectCurrentHandoffRoutes(data.handoffRoutes ?? []);
+  const currentRouteFor = (routeType: string) => currentHandoffRoutes.find((route) => String(route.route_type) === routeType);
   const currentAck = selectedLedger.find((event) => event.current_leaf === true && event.review_only !== true);
   const currentReadinessFingerprint = JSON.stringify([worker, readinessContextId, scheduledStart, scheduledEnd]);
   const readinessIsCurrent = readinessFingerprint === currentReadinessFingerprint;
@@ -937,6 +952,113 @@ function Readiness({
   }
   return (
     <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Urgent provider handoff routes</CardTitle>
+          <CardDescription>Ticket 06 delivery actions stay fail-closed until current emergency and incident routes exist. `000` remains a separate fixed emergency action.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid gap-4 md:grid-cols-3">
+            {["emergency", "incident", "complaint"].map((routeType) => {
+              const route = currentRouteFor(routeType);
+              return (
+                <div key={routeType} className="rounded-lg border p-4 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <strong className="capitalize">{routeType}</strong>
+                    <span className="rounded-full bg-muted px-2 py-1 text-xs">
+                      {route ? "Current" : "Missing"}
+                    </span>
+                  </div>
+                  {route ? (
+                    <div className="mt-2 space-y-1 text-muted-foreground">
+                      <p>{String(route.owner_role_label)}</p>
+                      <p>{String(route.primary_label)} · {String(route.primary_contact_uri)}</p>
+                      <p>Fallback {String(route.fallback_phone)}</p>
+                      <p>From {new Date(String(route.effective_from)).toLocaleString("en-AU")}</p>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-muted-foreground">No current provider-owned route. Worker delivery actions remain disabled.</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <form
+            className="grid gap-4 md:grid-cols-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void call(FORM_KEYS.handoffRoute, "cmd_admin_create_handoff_route", {
+                p_organisation_id: organisationId,
+                p_route_type: handoffRouteType,
+                p_guidance_text: handoffGuidance,
+                p_owner_role_label: handoffOwnerRole,
+                p_primary_label: handoffPrimaryLabel,
+                p_primary_contact_uri: handoffPrimaryUri,
+                p_fallback_phone: handoffFallbackPhone,
+                p_effective_from: new Date(handoffEffectiveFrom).toISOString(),
+                p_effective_until: handoffEffectiveUntil ? new Date(handoffEffectiveUntil).toISOString() : null,
+                p_payload: { source: "admin-readiness" },
+              });
+            }}
+          >
+            <Field label="Route type">
+              <select className={inputBase} value={handoffRouteType} onChange={(e) => setHandoffRouteType(e.target.value)}>
+                <option value="emergency">Emergency</option>
+                <option value="incident">Incident</option>
+                <option value="complaint">Complaint</option>
+              </select>
+            </Field>
+            <Field label="Owner role label">
+              <Input required value={handoffOwnerRole} onChange={(e) => setHandoffOwnerRole(e.target.value)} />
+            </Field>
+            <Field label="Primary action label">
+              <Input required value={handoffPrimaryLabel} onChange={(e) => setHandoffPrimaryLabel(e.target.value)} />
+            </Field>
+            <Field label="Primary phone or HTTPS URL">
+              <Input required value={handoffPrimaryUri} onChange={(e) => setHandoffPrimaryUri(e.target.value)} placeholder="tel:+61255501000 or https://…" />
+            </Field>
+            <Field label="Fallback phone">
+              <Input required value={handoffFallbackPhone} onChange={(e) => setHandoffFallbackPhone(e.target.value)} />
+            </Field>
+            <Field label="Effective from">
+              <Input required type="datetime-local" value={handoffEffectiveFrom} onChange={(e) => setHandoffEffectiveFrom(e.target.value)} />
+            </Field>
+            <Field label="Effective until (optional)">
+              <Input type="datetime-local" value={handoffEffectiveUntil} onChange={(e) => setHandoffEffectiveUntil(e.target.value)} />
+            </Field>
+            <Field label="Provider guidance">
+              <textarea
+                required
+                value={handoffGuidance}
+                onChange={(e) => setHandoffGuidance(e.target.value)}
+                className="min-h-24 w-full rounded-md border bg-transparent p-3 text-base"
+              />
+            </Field>
+            <div className="md:col-span-2">
+              <Button type="submit" disabled={actorRole !== "admin" || isPending(FORM_KEYS.handoffRoute)} aria-busy={isPending(FORM_KEYS.handoffRoute)}>
+                Save urgent handoff route
+              </Button>
+              {message(FORM_KEYS.handoffRoute)}
+            </div>
+          </form>
+
+          <div className="space-y-2 rounded border p-3 text-sm">
+            <strong>Worker handoff receipts</strong>
+            {selectedHandoffReceipts.length === 0 ? (
+              <p className="text-muted-foreground">Select a service record below to inspect append-only worker handoff receipts.</p>
+            ) : (
+              selectedHandoffReceipts.map((receipt) => (
+                <div key={String(receipt.id)} className="rounded bg-muted/30 p-2">
+                  <p>{String(receipt.route_type)} · {String(receipt.handoff_event).replaceAll("_", " ")} · channel {String(receipt.selected_channel)}</p>
+                  <p>Worker {workerLabel(String(receipt.actor_membership_id))} · claimed {new Date(String(receipt.claimed_at)).toLocaleString("en-AU")}</p>
+                  <p>Failure code: {String(receipt.failure_code ?? "none")} · receipt {String(receipt.command_receipt_id)}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </CardContent>
+      </Card>
       <Card>
         <CardHeader><CardTitle>Provider readiness journey</CardTitle><CardDescription>Complete this synthetic, provider-recorded path in order. Scope and catalogue are provider configuration; this screen makes no live Commission, NDIA catalogue, legal, billing or specialist-workflow claim.</CardDescription></CardHeader>
         <CardContent><ol className="grid gap-2 text-sm md:grid-cols-2 lg:grid-cols-5">{["Configure provider scope", "Add individual time item", "Define risk role and screening policy", "Verify worker screening and competence", "Activate reviewed participant context", "Create service-ready shift", "Inspect immutable snapshot", "Record provider acknowledgement", "Review readiness reasons", "Use recovery action"].map((step, i) => <li key={step} className="rounded-md border p-3"><span className="mr-2 font-semibold">{i + 1}.</span>{step}</li>)}</ol></CardContent>

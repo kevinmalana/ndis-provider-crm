@@ -77,6 +77,9 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
     competenceRequirement: cryptoUUID(),
     context: cryptoUUID(),
     snapshot: cryptoUUID(),
+    emergencyRoute: cryptoUUID(),
+    incidentRoute: cryptoUUID(),
+    complaintRoute: cryptoUUID(),
   };
 
   // Insert auth.users for each identity (FK target of global_profiles).
@@ -161,8 +164,16 @@ export async function seedStandardFixture(ex: Executor): Promise<Fixture> {
 
   // Participant + self-link + rep auth + external grant.
   await ex.execAsService(
-    `insert into public.participants (id, organisation_id, first_name, last_initial, created_by)
-     values ('${ids.participantRow}','${ids.org}','Maya','R','${ids.admin}')`,
+    `insert into public.participants (id, organisation_id, first_name, last_initial, location_hint, full_address, access_instructions, created_by)
+     values ('${ids.participantRow}','${ids.org}','Maya','R','Fairfield','12 Acacia St, Fairfield NSW 2165','Ring the side gate and wait for staff acknowledgement.','${ids.admin}')`,
+  );
+  await ex.execAsService(
+    `insert into public.organisation_handoff_route_versions
+       (id, organisation_id, route_type, guidance_text, owner_role_label, primary_label, primary_contact_uri, fallback_phone, effective_from, status, authored_by, reviewed_by)
+     values
+       ('${ids.emergencyRoute}','${ids.org}','emergency','Call the provider emergency line after immediate danger is addressed.','On-call manager','Call emergency coordinator','tel:+61255501000','02 5550 1099','2026-08-06T00:00:00Z','active','${ids.admin}','${ids.admin}'),
+       ('${ids.incidentRoute}','${ids.org}','incident','Use the incident route for urgent provider escalation that is not immediate danger.','Incident lead','Open incident guide','https://example.test/incident','02 5550 1088','2026-08-06T00:00:00Z','active','${ids.admin}','${ids.admin}'),
+       ('${ids.complaintRoute}','${ids.org}','complaint','Use the complaint route for later office follow-up only.','Complaints officer','Open complaints guide','https://example.test/complaints','02 5550 1077','2026-08-06T00:00:00Z','active','${ids.admin}','${ids.admin}')`,
   );
   await ex.execAsService(`insert into public.participant_service_context_versions (id,organisation_id,participant_id,capability_id,catalogue_item_id,role_version_id,jurisdiction,external_agreement_reference,plan_reference,source_type,owner_profile_id,reviewer_profile_id,effective_from,effective_until,goal_source,goal_reference,goal_display,lifecycle_state) values ('${ids.context}','${ids.org}','${ids.participantRow}','${ids.capability}','${ids.item}','${ids.roleVersion}','NSW','TEST-AGREEMENT','TEST-PLAN','provider_recorded','${ids.admin}','${ids.admin}','2026-08-06T00:00:00Z','2026-09-01T00:00:00Z','participant','TEST-GOAL','Test participant goal','active')`);
 

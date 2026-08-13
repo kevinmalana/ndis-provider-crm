@@ -24,6 +24,8 @@ const MIGRATION_NAMES = [
   "20260811000001_admin_repeat_review_db_fixup.sql",
   "20260811000002_admin_final_security_lineage_fixup.sql",
   "20260813000001_provider_readiness_ordering_fix.sql",
+  "20260813000002_worker_urgent_handoff_and_worker_flow.sql",
+  "20260813000003_ticket06_first_pass_review_fixup.sql",
 ];
 
 const diskMigrationNames = fs.readdirSync(MIGRATIONS_DIR)

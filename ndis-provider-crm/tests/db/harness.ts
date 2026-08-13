@@ -106,6 +106,13 @@ export async function bootTestDb(options: { through?: string } = {}): Promise<Ex
     grant select, insert, update, delete on all tables in schema public to test_auth_user;
     grant usage on all sequences in schema public to test_auth_user;
     grant execute on all functions in schema public to test_auth_user;
+    -- Keep intentionally internal SECURITY DEFINER helpers out of the
+    -- blanket test grant so ACL regressions match production semantics.
+    do $$ begin
+      if to_regprocedure('public.current_worker_route_state(uuid)') is not null then
+        execute 'revoke all on function public.current_worker_route_state(uuid) from test_auth_user';
+      end if;
+    end $$;
   `);
 
   return wrap(pg);
@@ -225,6 +232,16 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "service_context_id", type: "uuid" },
       { name: "scheduled_start", type: "timestamptz" }, { name: "scheduled_end", type: "timestamptz" },
       { name: "reason", type: "text" }, { name: "payload", type: "jsonb" },
+    ],
+  },
+  cmd_admin_create_handoff_route: {
+    params: [
+      { name: "command_id", type: "text" }, { name: "organisation_id", type: "uuid" },
+      { name: "route_type", type: "text" }, { name: "guidance_text", type: "text" },
+      { name: "owner_role_label", type: "text" }, { name: "primary_label", type: "text" },
+      { name: "primary_contact_uri", type: "text" }, { name: "fallback_phone", type: "text" },
+      { name: "effective_from", type: "timestamptz" }, { name: "effective_until", type: "timestamptz" },
+      { name: "payload", type: "jsonb" },
     ],
   },
   cmd_admin_create_service_context: {
@@ -359,6 +376,19 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "payload", type: "jsonb" },
     ],
   },
+  cmd_worker_record_handoff: {
+    params: [
+      { name: "command_id", type: "text" },
+      { name: "shift_id", type: "uuid" },
+      { name: "route_version_id", type: "uuid" },
+      { name: "event_type", type: "text" },
+      { name: "selected_channel", type: "text" },
+      { name: "failure_code", type: "text" },
+      { name: "claimed_at", type: "timestamptz" },
+      { name: "client_tz", type: "text" },
+      { name: "payload", type: "jsonb" },
+    ],
+  },
   cmd_finalise_summary: {
     params: [
       { name: "command_id", type: "text" },
@@ -392,6 +422,15 @@ const RPC_SIGNATURES: Record<string, { params: ParamSpec[] }> = {
       { name: "reason", type: "text" },
       { name: "payload", type: "jsonb" },
     ],
+  },
+  list_worker_today_shifts: {
+    params: [],
+  },
+  list_worker_shift_handoff_routes: {
+    params: [{ name: "shift_id", type: "uuid" }],
+  },
+  get_worker_shift_acknowledgement: {
+    params: [{ name: "shift_id", type: "uuid" }],
   },
   cmd_apply_correction: {
     params: [
