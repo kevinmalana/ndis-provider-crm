@@ -52,6 +52,25 @@ describe("PostgREST named-argument and ACL contract", () => {
     expect(migration).toContain("p_shift_id");
   });
 
+  it("keeps the urgent handoff prerequisite bound to explicit p_-prefixed route and worker arguments", () => {
+    const migration = read("supabase/migrations/20260813000002_worker_urgent_handoff_and_worker_flow.sql");
+    const commands = read("src/lib/supabase/commands.ts");
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_admin_create_handoff_route\(\s*p_command_id text,\s*p_organisation_id uuid,\s*p_route_type text/s,
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_worker_record_handoff\(\s*p_command_id text,\s*p_shift_id uuid,\s*p_route_version_id uuid/s,
+    );
+    expect(migration).toContain(
+      "grant execute on function public.cmd_admin_create_handoff_route(text,uuid,text,text,text,text,text,text,timestamptz,timestamptz,jsonb) to authenticated;",
+    );
+    expect(migration).toContain(
+      "grant execute on function public.cmd_worker_record_handoff(text,uuid,uuid,text,text,text,timestamptz,text,jsonb) to authenticated;",
+    );
+    expect(commands).toContain('adminRpc(client, "cmd_admin_create_handoff_route", args as unknown as Record<string, unknown>)');
+    expect(commands).toContain('client.rpc("cmd_worker_record_handoff", args)');
+  });
+
   it("contains explicit rerunnable DDL for pre-existing command receipts and tenant FKs", () => {
     const migration = read("supabase/migrations/0004_v1_domain_tables.sql");
     expect(migration).toContain(
@@ -70,5 +89,32 @@ describe("PostgREST named-argument and ACL contract", () => {
       "representative_authorities_identity_tenant",
     );
     expect(migration).toContain("external_grants_identity_tenant");
+  });
+
+  it("keeps the Ticket 06 review fixup RPC overrides on an empty search path with append-only handoff evidence", () => {
+    const migration = read("supabase/migrations/20260813000003_ticket06_first_pass_review_fixup.sql");
+    expect(migration).toContain(
+      "revoke all on function public.current_worker_route_state(uuid) from authenticated;",
+    );
+    expect(migration).not.toContain(
+      "grant execute on function public.current_worker_route_state(uuid) to authenticated;",
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_on_my_way\([\s\S]+?security definer[\s\S]+?set search_path = ''/s,
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_start_shift\([\s\S]+?security definer[\s\S]+?set search_path = ''/s,
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_end_shift\([\s\S]+?security definer[\s\S]+?set search_path = ''/s,
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_submit_summary\([\s\S]+?security definer[\s\S]+?set search_path = ''/s,
+    );
+    expect(migration).toMatch(
+      /create or replace function public\.cmd_worker_record_handoff\([\s\S]+?security definer[\s\S]+?set search_path = ''/s,
+    );
+    expect(migration).toContain("create trigger worker_handoff_receipts_immutable");
+    expect(migration).toContain("execute function public.prevent_05b_immutable_evidence()");
   });
 });

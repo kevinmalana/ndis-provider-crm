@@ -14,10 +14,12 @@ external parties.
 
 See the project artifacts for full context:
 
-- [Epic brief](file:///Users/kevinmalana/.traycer/epics/d2224b09-58de-43fc-b758-76653d2a5742/artifacts/ndis-provider-crm-brief/index.md)
-- [Technical plan](file:///Users/kevinmalana/.traycer/epics/d2224b09-58de-43fc-b758-76653d2a5742/artifacts/ndis-provider-crm-technical-plan/index.md)
-- [Decision log](file:///Users/kevinmalana/.traycer/epics/d2224b09-58de-43fc-b758-76653d2a5742/artifacts/decision-log/index.md)
-- [Human-in-the-loop runbook](file:///Users/kevinmalana/.traycer/epics/d2224b09-58de-43fc-b758-76653d2a5742/artifacts/human-in-the-loop-runbook/index.md)
+- [Migration handoff](../MIGRATION_HANDOFF.md)
+- [Traycer artifact archive](docs/traycer/README.md)
+- [Epic brief](docs/traycer/artifacts/ndis-provider-crm-brief/index.md)
+- [Technical plan](docs/traycer/artifacts/ndis-provider-crm-technical-plan/index.md)
+- [Decision log](docs/traycer/artifacts/decision-log/index.md)
+- [Human-in-the-loop runbook](docs/traycer/artifacts/human-in-the-loop-runbook/index.md)
 
 ## Prerequisites
 

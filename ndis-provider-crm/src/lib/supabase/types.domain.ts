@@ -55,7 +55,9 @@ export type CommandType =
   | "request_correction"
   | "apply_correction"
   | "request_access"
-  | "accept_invitation";
+  | "accept_invitation"
+  | "admin_handoff_route"
+  | "worker_handoff";
 
 export type CommandStatus =
   | "accepted"
@@ -157,6 +159,9 @@ export interface Participant {
   organisation_id: UUID;
   first_name: string;
   last_initial: string | null;
+  location_hint: string | null;
+  full_address: string | null;
+  access_instructions: string | null;
   archived_at: IsoTimestamp | null;
   created_by: UUID | null;
   created_at: IsoTimestamp;
@@ -401,6 +406,49 @@ export interface ShiftEvent {
   created_at: IsoTimestamp;
 }
 
+export interface HandoffRouteVersion {
+  id: UUID;
+  organisation_id: UUID;
+  route_type: "emergency" | "incident" | "complaint";
+  guidance_text: string;
+  owner_role_label: string;
+  primary_label: string;
+  primary_contact_uri: string;
+  fallback_phone: string;
+  effective_from: IsoTimestamp;
+  effective_until: IsoTimestamp | null;
+  status: "active" | "superseded" | "withdrawn";
+  authored_by: UUID;
+  reviewed_by: UUID | null;
+  superseded_by: UUID | null;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+}
+
+export interface WorkerHandoffReceipt {
+  id: UUID;
+  organisation_id: UUID;
+  shift_id: UUID;
+  assignment_id: UUID;
+  actor_membership_id: UUID;
+  actor_profile_id: UUID;
+  route_version_id: UUID;
+  route_type: "emergency" | "incident";
+  handoff_event: "initiated" | "worker_confirmed" | "failed";
+  selected_channel: "primary" | "fallback";
+  failure_code:
+    | "launch_blocked"
+    | "launch_failed"
+    | "unsupported_device"
+    | "worker_cancelled"
+    | null;
+  claimed_at: IsoTimestamp;
+  client_tz: string | null;
+  server_received_at: IsoTimestamp;
+  command_receipt_id: UUID;
+  created_at: IsoTimestamp;
+}
+
 /* ---------- RPC parameter + result signatures ---------- *
  * Every SQL parameter uses a `p_` prefix; the application code sends
  * the same prefixed keys. PostgREST matches named arguments exactly.
@@ -441,6 +489,9 @@ export interface CommandResult {
   requester_kind?: CorrectionRequesterKind;
   new_assignment_id?: UUID;
   previous_assignment_id?: UUID;
+  handoff_receipt_id?: UUID;
+  route_type?: "emergency" | "incident" | "complaint";
+  event_type?: string;
   outcome?: Record<string, unknown>;
 }
 
@@ -515,6 +566,7 @@ export interface AdminCommandResult extends CommandResult {
   snapshot_id?: UUID;
   readiness?: Record<string, unknown>;
   identifier?: string;
+  route_version_id?: UUID;
 }
 
 export interface AdminCreateParticipantRpcArgs {
@@ -540,6 +592,20 @@ export interface AdminCreateShiftRpcArgs {
 }
 
 export type AdminCreateServiceReadyShiftRpcArgs = AdminCreateShiftRpcArgs;
+
+export interface AdminHandoffRouteRpcArgs {
+  p_command_id: string;
+  p_organisation_id: UUID;
+  p_route_type: "emergency" | "incident" | "complaint";
+  p_guidance_text: string;
+  p_owner_role_label: string;
+  p_primary_label: string;
+  p_primary_contact_uri: string;
+  p_fallback_phone: string;
+  p_effective_from: IsoTimestamp;
+  p_effective_until: IsoTimestamp | null;
+  p_payload: Record<string, unknown>;
+}
 
 export interface AdminProviderScopeRpcArgs {
   p_command_id: string;
@@ -624,6 +690,23 @@ export interface ProviderReadinessRpcArgs {
   p_context_id: UUID;
   p_scheduled_start: IsoTimestamp;
   p_scheduled_end: IsoTimestamp;
+}
+
+export interface WorkerHandoffRpcArgs {
+  p_command_id: string;
+  p_shift_id: UUID;
+  p_route_version_id: UUID;
+  p_event_type: "initiated" | "worker_confirmed" | "failed";
+  p_selected_channel: "primary" | "fallback";
+  p_failure_code:
+    | "launch_blocked"
+    | "launch_failed"
+    | "unsupported_device"
+    | "worker_cancelled"
+    | null;
+  p_claimed_at: IsoTimestamp;
+  p_client_tz: string;
+  p_payload: Record<string, unknown>;
 }
 
 export interface ParticipantServiceContextVersion {

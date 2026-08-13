@@ -14,8 +14,8 @@ export default async function AdminPage() {
 
   const supabase = await createSupabaseServerClient();
   const organisationId = ctx.active.organisation_id;
-  const [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts, providerScopes, capabilities, catalogues, catalogueItems, roles, screeningPolicies, screeningVerifications, screeningPathways, competenceRequirements, competenceEvidence, maskedIdentifiers, snapshots, ackLedger] = await Promise.all([
-    supabase.from("participants").select("id,first_name,last_initial,created_at").eq("organisation_id", organisationId).is("archived_at", null).order("created_at", { ascending: false }),
+  const [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts, providerScopes, capabilities, catalogues, catalogueItems, roles, screeningPolicies, screeningVerifications, screeningPathways, competenceRequirements, competenceEvidence, maskedIdentifiers, snapshots, ackLedger, handoffRoutes, handoffReceipts] = await Promise.all([
+    supabase.from("participants").select("id,first_name,last_initial,location_hint,full_address,access_instructions,created_at").eq("organisation_id", organisationId).is("archived_at", null).order("created_at", { ascending: false }),
     supabase.from("critical_info_cards").select("id,participant_id,content_text,reviewed_at,review_due_at,status").eq("organisation_id", organisationId).eq("status", "active"),
     supabase.from("organisation_memberships").select("id,profile_id,role,status,effective_from").eq("organisation_id", organisationId).eq("status", "active").order("role"),
     supabase.from("shifts").select("id,participant_id,scheduled_start,scheduled_end,state,version").eq("organisation_id", organisationId).order("scheduled_start"),
@@ -41,9 +41,11 @@ export default async function AdminPage() {
     supabase.rpc("list_admin_masked_participant_ndis_identifiers", { p_organisation_id: organisationId }),
     supabase.from("shift_service_snapshots").select("id,shift_id,service_context_id,capability_id,catalogue_item_id,catalogue_version_id,item_code,item_name,support_category,service_kind,time_unit,goal_reference,goal_display,scheduled_start,scheduled_end").eq("organisation_id", organisationId).order("created_at", { ascending: false }),
     supabase.rpc("list_admin_acknowledgement_ledger", { p_organisation_id: organisationId, p_shift_id: null }),
+    supabase.from("organisation_handoff_route_versions").select("id,route_type,guidance_text,owner_role_label,primary_label,primary_contact_uri,fallback_phone,effective_from,effective_until,status,authored_by,reviewed_by,superseded_by,created_at").eq("organisation_id", organisationId).order("effective_from", { ascending: false }),
+    supabase.from("worker_handoff_receipts").select("id,shift_id,assignment_id,actor_membership_id,actor_profile_id,route_version_id,route_type,handoff_event,selected_channel,failure_code,claimed_at,client_tz,server_received_at,command_receipt_id,created_at").eq("organisation_id", organisationId).order("created_at", { ascending: false }),
   ]);
 
-  const readError = [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts, providerScopes, capabilities, catalogues, catalogueItems, roles, screeningPolicies, screeningVerifications, screeningPathways, competenceRequirements, competenceEvidence, maskedIdentifiers, snapshots, ackLedger].find((result) => result.error)?.error;
+  const readError = [participants, cards, memberships, shifts, assignments, authorities, grants, consents, availability, audit, identities, selfLinks, serviceContexts, providerScopes, capabilities, catalogues, catalogueItems, roles, screeningPolicies, screeningVerifications, screeningPathways, competenceRequirements, competenceEvidence, maskedIdentifiers, snapshots, ackLedger, handoffRoutes, handoffReceipts].find((result) => result.error)?.error;
   if (readError) {
     return <section className="space-y-4 rounded-xl border border-danger/40 bg-danger/5 p-6" role="alert">
       <h1 className="text-xl font-semibold">Admin workspace could not load</h1>
@@ -83,6 +85,8 @@ export default async function AdminPage() {
         maskedIdentifiers: maskedIdentifiers.data ?? [],
         snapshots: snapshots.data ?? [],
         ackLedger: ackLedger.data ?? [],
+        handoffRoutes: handoffRoutes.data ?? [],
+        handoffReceipts: handoffReceipts.data ?? [],
       }}
     />
   );

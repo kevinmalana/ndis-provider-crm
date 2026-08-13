@@ -28,19 +28,21 @@ import type {
   AdminCommandResult,
   AdminCreateParticipantRpcArgs,
   AdminCreateShiftRpcArgs,
+  AdminHandoffRouteRpcArgs,
   AdminProviderScopeRpcArgs,
   AdminSupportCapabilityRpcArgs,
   AdminCatalogueItemRpcArgs,
   AdminIdentifierRpcArgs,
   AdminServiceContextRpcArgs,
   ProviderReadinessRpcArgs,
+  WorkerHandoffRpcArgs,
 } from "@/lib/supabase/types.domain";
 
 type RpcClient = SupabaseClient;
 
 export async function cmdOnMyWay(
   client: RpcClient,
-  args: Omit<VersionedCommandRpcArgs, "expected_version">,
+  args: Omit<VersionedCommandRpcArgs, "p_expected_version">,
 ): Promise<CommandResult> {
   const { data, error } = await client.rpc("cmd_on_my_way", args);
   if (error) throw error;
@@ -199,6 +201,9 @@ export const cmdAdminSetAvailability = (client: RpcClient, args: Record<string, 
 export const cmdAdminCreateServiceReadyShift = (client: RpcClient, args: AdminCreateShiftRpcArgs) =>
   adminRpc(client, "cmd_admin_create_service_ready_shift", args as unknown as Record<string, unknown>);
 
+export const cmdAdminCreateHandoffRoute = (client: RpcClient, args: AdminHandoffRouteRpcArgs) =>
+  adminRpc(client, "cmd_admin_create_handoff_route", args as unknown as Record<string, unknown>);
+
 export const cmdAdminRevealParticipantNdisIdentifier = (client: RpcClient, args: Record<string, unknown>) =>
   adminRpc(client, "cmd_admin_reveal_participant_ndis_identifier", args);
 
@@ -251,4 +256,13 @@ export async function listAdminAcknowledgementLedger(client: RpcClient, organisa
   const { data, error } = await client.rpc("list_admin_acknowledgement_ledger", { p_organisation_id: organisationId, p_shift_id: shiftId });
   if (error) throw error;
   return (data ?? []) as Array<Record<string, unknown>>;
+}
+
+export async function cmdWorkerRecordHandoff(
+  client: RpcClient,
+  args: WorkerHandoffRpcArgs,
+): Promise<CommandResult> {
+  const { data, error } = await client.rpc("cmd_worker_record_handoff", args);
+  if (error) throw error;
+  return data as CommandResult;
 }

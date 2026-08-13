@@ -56,11 +56,18 @@ export default async function AppLayout({
               Signed in as {displayName} · role {roleLabel}
             </p>
           </div>
-          {active && (active.role === "admin" || active.role === "scheduler") ? (
-            <Link className="rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted" href="/app/admin">
-              Admin workspace
-            </Link>
-          ) : null}
+          <div className="flex items-center gap-2">
+            {active?.role === "worker" ? (
+              <Link className="rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted" href="/worker">
+                Worker flow
+              </Link>
+            ) : null}
+            {active && (active.role === "admin" || active.role === "scheduler") ? (
+              <Link className="rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted" href="/app/admin">
+                Admin workspace
+              </Link>
+            ) : null}
+          </div>
           <SignOutButton />
         </div>
       </header>
